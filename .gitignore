@@ -55,6 +55,10 @@ unlinked_spec.ds
 **/android/key.properties
 *.jks
 
+# IDE files
+.idea/
+*.iml
+
 # iOS/XCode related
 **/ios/**/*.mode1v3
 **/ios/**/*.mode2v3
