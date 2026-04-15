@@ -380,10 +380,17 @@ class _AiChatScreenState extends State<AiChatScreen> {
                 bottomRight: Radius.circular(isUser ? 0 : 16),
               ),
             ),
-            child: Text(
-              msg.text,
-              style: TextStyle(
-                color: isUser ? Colors.black : AppColors.textPrimary,
+            child: SelectionArea(
+              child: SelectableText(
+                msg.text,
+                style: TextStyle(
+                  color: isUser ? Colors.black : AppColors.textPrimary,
+                ),
+                contextMenuBuilder: (context, editableTextState) {
+                  return AdaptiveTextSelectionToolbar.editableText(
+                    editableTextState: editableTextState,
+                  );
+                },
               ),
             ),
           ),
@@ -456,6 +463,12 @@ class _AiChatScreenState extends State<AiChatScreen> {
                     controller: _controller,
                     onSubmitted: isEnabled ? _sendMessage : null,
                     enabled: isEnabled,
+                    enableInteractiveSelection: true,
+                    contextMenuBuilder: (context, editableTextState) {
+                      return AdaptiveTextSelectionToolbar.editableText(
+                        editableTextState: editableTextState,
+                      );
+                    },
                     decoration: InputDecoration(
                       hintText: isEnabled
                           ? 'Message AI Scheduler... or use q/...'

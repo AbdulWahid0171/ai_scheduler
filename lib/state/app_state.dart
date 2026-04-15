@@ -171,6 +171,11 @@ class AppState extends ChangeNotifier {
     if (reminder.id == null) {
       return;
     }
+    if (value) {
+      await _notificationService.cancelReminder(reminder.notificationId);
+    } else if (reminder.dateTime.isAfter(DateTime.now())) {
+      await _notificationService.scheduleReminder(reminder);
+    }
     await _databaseHelper.toggleComplete(reminder.id!, value);
     await refresh();
   }

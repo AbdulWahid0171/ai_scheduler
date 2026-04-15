@@ -4,6 +4,7 @@ import android.appwidget.AppWidgetManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -18,11 +19,65 @@ class MainActivity : FlutterActivity() {
         ).setMethodCallHandler { call, result ->
             when (call.method) {
                 "updateHomeWidget" -> {
-                    val title = call.argument<String>("title") ?: "Countdown Timers"
-                    val subtitle = call.argument<String>("subtitle") ?: "No active countdowns"
-                    val targetMillis = call.argument<Long>("targetMillis") ?: 0L
-                    updateHomeWidget(applicationContext, title, subtitle, targetMillis)
+                    val rawEntries = call.argument<List<Map<String, Any?>>>("entries") ?: emptyList()
+                    updateHomeWidget(applicationContext, rawEntries)
                     result.success(null)
+                }
+
+                else -> result.notImplemented()
+            }
+        }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "ai_scheduler/alarm"
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "scheduleAlarm" -> {
+                    val id = call.argument<Int>("id")
+                    val title = call.argument<String>("title") ?: "Alarm"
+                    val body = call.argument<String>("body") ?: ""
+                    val triggerAtMillis = call.argument<Long>("triggerAtMillis")
+                    val mode = call.argument<String>("mode") ?: "alarm"
+                    if (id == null || triggerAtMillis == null) {
+                        result.error("invalid_args", "Missing alarm arguments", null)
+                        return@setMethodCallHandler
+                    }
+                    AlarmScheduler.scheduleAlarm(
+                        context = applicationContext,
+                        id = id,
+                        title = title,
+                        body = body,
+                        triggerAtMillis = triggerAtMillis,
+                        mode = mode,
+                    )
+                    result.success(null)
+                }
+
+                "cancelAlarm" -> {
+                    val id = call.argument<Int>("id")
+                    if (id == null) {
+                        result.error("invalid_args", "Missing alarm id", null)
+                        return@setMethodCallHandler
+                    }
+                    AlarmScheduler.cancelAlarm(applicationContext, id)
+                    result.success(null)
+                }
+
+                "stopAlarm" -> {
+                    val id = call.argument<Int>("id")
+                    AlarmScheduler.stopAlarm(applicationContext, id)
+                    result.success(null)
+                }
+
+                "canScheduleExactAlarms" -> {
+                    val alarmManager = AlarmScheduler.alarmManager(applicationContext)
+                    val canSchedule = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        alarmManager.canScheduleExactAlarms()
+                    } else {
+                        true
+                    }
+                    result.success(canSchedule)
                 }
 
                 else -> result.notImplemented()
@@ -30,13 +85,17 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun updateHomeWidget(context: Context, title: String, subtitle: String, targetMillis: Long) {
+    private fun updateHomeWidget(context: Context, entries: List<Map<String, Any?>>) {
         val prefs = context.getSharedPreferences("ai_scheduler_widget", Context.MODE_PRIVATE)
-        prefs.edit()
-            .putString("title", title)
-            .putString("subtitle", subtitle)
-            .putLong("targetMillis", targetMillis)
-            .apply()
+        prefs.edit().apply {
+            putInt("entryCount", entries.size.coerceAtMost(3))
+            repeat(3) { index ->
+                val entry = entries.getOrNull(index)
+                putString("title_$index", entry?.get("title") as? String ?: "")
+                putLong("targetMillis_$index", (entry?.get("targetMillis") as? Number)?.toLong() ?: 0L)
+            }
+            apply()
+        }
 
         val manager = AppWidgetManager.getInstance(context)
         val componentName = ComponentName(context, SchedulerAppWidgetProvider::class.java)

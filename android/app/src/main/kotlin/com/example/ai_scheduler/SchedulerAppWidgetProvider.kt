@@ -37,14 +37,7 @@ class SchedulerAppWidgetProvider : AppWidgetProvider() {
             appWidgetId: Int
         ) {
             val prefs = context.getSharedPreferences("ai_scheduler_widget", Context.MODE_PRIVATE)
-            val title = prefs.getString("title", "Countdown Timers") ?: "Countdown Timers"
-            val subtitle = prefs.getString("subtitle", "No active countdowns") ?: "No active countdowns"
-            val targetMillis = prefs.getLong("targetMillis", 0L)
-            val remainingText = if (targetMillis > System.currentTimeMillis()) {
-                formatRemaining(targetMillis - System.currentTimeMillis())
-            } else {
-                subtitle
-            }
+            val entryCount = prefs.getInt("entryCount", 0)
 
             val launchIntent = Intent(context, MainActivity::class.java)
             val pendingIntent = PendingIntent.getActivity(
@@ -55,13 +48,57 @@ class SchedulerAppWidgetProvider : AppWidgetProvider() {
             )
 
             val views = RemoteViews(context.packageName, R.layout.scheduler_home_widget).apply {
-                setTextViewText(R.id.widget_title, title)
-                setTextViewText(R.id.widget_subtitle, remainingText)
+                setTextViewText(
+                    R.id.widget_header,
+                    if (entryCount > 0) "Top $entryCount Countdown${if (entryCount == 1) "" else "s"}" else "Countdown Widget"
+                )
+                setViewVisibility(R.id.widget_empty_state, if (entryCount == 0) android.view.View.VISIBLE else android.view.View.GONE)
+                setViewVisibility(R.id.widget_list, if (entryCount == 0) android.view.View.GONE else android.view.View.VISIBLE)
+
+                bindEntry(this, 0, prefs)
+                bindEntry(this, 1, prefs)
+                bindEntry(this, 2, prefs)
                 setOnClickPendingIntent(R.id.widget_root, pendingIntent)
             }
 
             appWidgetManager.updateAppWidget(appWidgetId, views)
             scheduleNextUpdate(context)
+        }
+
+        private fun bindEntry(
+            views: RemoteViews,
+            index: Int,
+            prefs: android.content.SharedPreferences,
+        ) {
+            val titleViewId = when (index) {
+                0 -> R.id.timer_title_1
+                1 -> R.id.timer_title_2
+                else -> R.id.timer_title_3
+            }
+            val subtitleViewId = when (index) {
+                0 -> R.id.timer_subtitle_1
+                1 -> R.id.timer_subtitle_2
+                else -> R.id.timer_subtitle_3
+            }
+            val rowViewId = when (index) {
+                0 -> R.id.timer_row_1
+                1 -> R.id.timer_row_2
+                else -> R.id.timer_row_3
+            }
+
+            val title = prefs.getString("title_$index", "") ?: ""
+            val targetMillis = prefs.getLong("targetMillis_$index", 0L)
+            val visible = title.isNotBlank() && targetMillis > System.currentTimeMillis()
+            views.setViewVisibility(rowViewId, if (visible) android.view.View.VISIBLE else android.view.View.GONE)
+            if (!visible) {
+                return
+            }
+
+            views.setTextViewText(titleViewId, title)
+            views.setTextViewText(
+                subtitleViewId,
+                formatRemaining(targetMillis - System.currentTimeMillis())
+            )
         }
 
         private fun scheduleNextUpdate(context: Context) {
@@ -87,7 +124,7 @@ class SchedulerAppWidgetProvider : AppWidgetProvider() {
             val hours = totalSeconds / 3600L
             val minutes = (totalSeconds % 3600L) / 60L
             val seconds = totalSeconds % 60L
-            return String.format("%02d:%02d:%02d remaining", hours, minutes, seconds)
+            return String.format("%02d:%02d:%02d left", hours, minutes, seconds)
         }
     }
 }
