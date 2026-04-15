@@ -13,15 +13,18 @@ class AddEditReminderSheet extends StatefulWidget {
     super.key,
     this.reminder,
     this.initialDate,
+    this.countdownMode = false,
   });
 
   final Reminder? reminder;
   final DateTime? initialDate;
+  final bool countdownMode;
 
   static Future<void> show(
     BuildContext context, {
     Reminder? reminder,
     DateTime? initialDate,
+    bool countdownMode = false,
   }) {
     return showModalBottomSheet<void>(
       context: context,
@@ -30,6 +33,7 @@ class AddEditReminderSheet extends StatefulWidget {
       builder: (_) => AddEditReminderSheet(
         reminder: reminder,
         initialDate: initialDate,
+        countdownMode: countdownMode,
       ),
     );
   }
@@ -137,10 +141,14 @@ class _AddEditReminderSheetState extends State<AddEditReminderSheet> {
       return;
     }
 
+    final title = _titleController.text.trim().isEmpty && widget.countdownMode
+        ? 'Countdown'
+        : _titleController.text.trim();
+
     final now = DateTime.now();
     final reminder = Reminder(
       id: widget.reminder?.id,
-      title: _titleController.text.trim(),
+      title: title,
       description: _descriptionController.text.trim().isEmpty
           ? null
           : _descriptionController.text.trim(),
@@ -172,6 +180,8 @@ class _AddEditReminderSheetState extends State<AddEditReminderSheet> {
     if (reminder == null) {
       return;
     }
+    final appState = context.read<AppState>();
+    final navigator = Navigator.of(context);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -190,8 +200,8 @@ class _AddEditReminderSheetState extends State<AddEditReminderSheet> {
       ),
     );
     if (confirmed == true && mounted) {
-      await context.read<AppState>().deleteReminder(reminder);
-      Navigator.of(context).pop();
+      await appState.deleteReminder(reminder);
+      navigator.pop();
     }
   }
 
@@ -235,31 +245,42 @@ class _AddEditReminderSheetState extends State<AddEditReminderSheet> {
                 ),
                 const SizedBox(height: 20),
                 Text(
-                  widget.reminder == null ? 'Add reminder' : 'Edit reminder',
+                  widget.countdownMode
+                      ? (widget.reminder == null
+                          ? 'Set day countdown'
+                          : 'Edit day countdown')
+                      : (widget.reminder == null ? 'Add reminder' : 'Edit reminder'),
                   style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                         color: AppColors.textPrimary,
                         fontWeight: FontWeight.w700,
                       ),
                 ),
                 const SizedBox(height: 20),
-                NaturalLanguageInputBar(
-                  controller: _nlController,
-                  preview: _preview,
-                  onChanged: _applyNaturalLanguage,
-                ),
-                const SizedBox(height: 20),
+                if (!widget.countdownMode) ...[
+                  NaturalLanguageInputBar(
+                    controller: _nlController,
+                    preview: _preview,
+                    onChanged: _applyNaturalLanguage,
+                  ),
+                  const SizedBox(height: 20),
+                ],
                 _buildTextField(
                   controller: _titleController,
-                  label: 'Title',
-                  validator: (value) =>
-                      (value == null || value.trim().isEmpty) ? 'Title is required' : null,
+                  label: widget.countdownMode ? 'Title (optional)' : 'Title',
+                  validator: widget.countdownMode
+                      ? null
+                      : (value) => (value == null || value.trim().isEmpty)
+                          ? 'Title is required'
+                          : null,
                 ),
-                const SizedBox(height: 12),
-                _buildTextField(
-                  controller: _descriptionController,
-                  label: 'Description',
-                  maxLines: 3,
-                ),
+                if (!widget.countdownMode) ...[
+                  const SizedBox(height: 12),
+                  _buildTextField(
+                    controller: _descriptionController,
+                    label: 'Description',
+                    maxLines: 3,
+                  ),
+                ],
                 const SizedBox(height: 18),
                 Row(
                   children: [
@@ -280,57 +301,59 @@ class _AddEditReminderSheetState extends State<AddEditReminderSheet> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 20),
-                const Text(
-                  'Priority',
-                  style: TextStyle(
-                    color: AppColors.textSecondary,
-                    fontWeight: FontWeight.w600,
+                if (!widget.countdownMode) ...[
+                  const SizedBox(height: 20),
+                  const Text(
+                    'Priority',
+                    style: TextStyle(
+                      color: AppColors.textSecondary,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 10),
-                Wrap(
-                  spacing: 10,
-                  children: ReminderPriority.values.map((priority) {
-                    final selected = _priority == priority;
-                    return ChoiceChip(
-                      label: Text(priority.toUpperCase()),
-                      selected: selected,
-                      selectedColor:
-                          ReminderPriority.colorOf(priority).withAlpha(56),
-                      labelStyle: TextStyle(
-                        color: selected
-                            ? ReminderPriority.colorOf(priority)
-                            : AppColors.textSecondary,
-                      ),
-                      onSelected: (_) => setState(() => _priority = priority),
-                    );
-                  }).toList(),
-                ),
-                const SizedBox(height: 20),
-                DropdownButtonFormField<String>(
-                  initialValue: _repeatRule,
-                  dropdownColor: AppColors.surface,
-                  decoration: _inputDecoration('Repeat'),
-                  items: ReminderRepeatRule.values
-                      .map(
-                        (rule) => DropdownMenuItem(
-                          value: rule,
-                          child: Text(
-                            rule == ReminderRepeatRule.none
-                                ? 'None'
-                                : '${rule[0].toUpperCase()}${rule.substring(1)}',
-                            style: const TextStyle(color: AppColors.textPrimary),
-                          ),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 10,
+                    children: ReminderPriority.values.map((priority) {
+                      final selected = _priority == priority;
+                      return ChoiceChip(
+                        label: Text(priority.toUpperCase()),
+                        selected: selected,
+                        selectedColor:
+                            ReminderPriority.colorOf(priority).withAlpha(56),
+                        labelStyle: TextStyle(
+                          color: selected
+                              ? ReminderPriority.colorOf(priority)
+                              : AppColors.textSecondary,
                         ),
-                      )
-                      .toList(),
-                  onChanged: (value) {
-                    if (value != null) {
-                      setState(() => _repeatRule = value);
-                    }
-                  },
-                ),
+                        onSelected: (_) => setState(() => _priority = priority),
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 20),
+                  DropdownButtonFormField<String>(
+                    initialValue: _repeatRule,
+                    dropdownColor: AppColors.surface,
+                    decoration: _inputDecoration('Repeat'),
+                    items: ReminderRepeatRule.values
+                        .map(
+                          (rule) => DropdownMenuItem(
+                            value: rule,
+                            child: Text(
+                              rule == ReminderRepeatRule.none
+                                  ? 'None'
+                                  : '${rule[0].toUpperCase()}${rule.substring(1)}',
+                              style: const TextStyle(color: AppColors.textPrimary),
+                            ),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (value) {
+                      if (value != null) {
+                        setState(() => _repeatRule = value);
+                      }
+                    },
+                  ),
+                ],
                 const SizedBox(height: 24),
                 Row(
                   children: [
@@ -355,7 +378,9 @@ class _AddEditReminderSheetState extends State<AddEditReminderSheet> {
                           foregroundColor: Colors.black,
                           padding: const EdgeInsets.symmetric(vertical: 14),
                         ),
-                        child: const Text('Save reminder'),
+                        child: Text(
+                          widget.countdownMode ? 'Start countdown' : 'Save reminder',
+                        ),
                       ),
                     ),
                   ],

@@ -28,18 +28,26 @@ class _MultiCountdownWidgetState extends State<MultiCountdownWidget> {
   @override
   void initState() {
     super.initState();
-    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {});
-    });
+    _scheduleNextTick();
   }
 
   @override
   void dispose() {
     _timer?.cancel();
     super.dispose();
+  }
+
+  void _scheduleNextTick() {
+    _timer?.cancel();
+    final now = DateTime.now();
+    final delay = Duration(milliseconds: 1000 - now.millisecond);
+    _timer = Timer(delay, () {
+      if (!mounted) {
+        return;
+      }
+      setState(() {});
+      _scheduleNextTick();
+    });
   }
 
   @override

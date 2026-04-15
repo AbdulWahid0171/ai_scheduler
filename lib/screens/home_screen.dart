@@ -32,8 +32,19 @@ class HomeScreen extends StatelessWidget {
                     onTap: () {
                       final next = state.nextUpcomingReminder;
                       if (next != null) {
-                        AddEditReminderSheet.show(context, reminder: next);
+                        AddEditReminderSheet.show(
+                          context,
+                          reminder: next,
+                          countdownMode: true,
+                        );
                       }
+                    },
+                    onCreateCountdown: () {
+                      AddEditReminderSheet.show(
+                        context,
+                        initialDate: DateTime.now().add(const Duration(days: 1)),
+                        countdownMode: true,
+                      );
                     },
                   ),
                   const SizedBox(height: 16),
@@ -46,7 +57,7 @@ class HomeScreen extends StatelessWidget {
                         builder: (context) => AlertDialog(
                           title: const Text('Home Widget'),
                           content: const Text(
-                            'To add the countdown widget, long-press your home screen, open Widgets, then add AI Scheduler.\n\nUse this after starting timers so the widget shows your latest top three countdowns.',
+                            'To add a widget, long-press your home screen, open Widgets, then add AI Scheduler.\n\nThere are now two widget types:\n- Countdown Widget for your top three timers\n- Day Countdown Widget for the next reminder countdown',
                           ),
                           actions: [
                             TextButton(
@@ -136,7 +147,7 @@ class _WidgetCallout extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Countdown Widget',
+                  'Widgets',
                   style: TextStyle(
                     color: AppColors.textPrimary,
                     fontWeight: FontWeight.w700,
@@ -144,7 +155,7 @@ class _WidgetCallout extends StatelessWidget {
                 ),
                 SizedBox(height: 4),
                 Text(
-                  'Show your top three timers on the home screen.',
+                  'Add timer and day-countdown widgets to the home screen.',
                   style: TextStyle(
                     color: AppColors.textSecondary,
                     fontSize: 12,

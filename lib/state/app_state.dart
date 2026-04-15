@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../database/database_helper.dart';
 import '../models/chat_message.dart';
 import '../models/reminder.dart';
+import '../services/home_widget_service.dart';
 import '../services/notification_service.dart';
 import '../utils/constants.dart';
 import '../utils/date_utils.dart';
@@ -51,6 +52,9 @@ class AppState extends ChangeNotifier {
   Future<void> refresh() async {
     _reminders = await _databaseHelper.getAllReminders();
     _reminders.sort((a, b) => a.dateTime.compareTo(b.dateTime));
+    await HomeWidgetService.updateDayCountdownWidget(
+      reminder: nextUpcomingReminder,
+    );
     notifyListeners();
   }
 

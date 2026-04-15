@@ -24,6 +24,13 @@ class MainActivity : FlutterActivity() {
                     result.success(null)
                 }
 
+                "updateDayCountdownWidget" -> {
+                    val title = call.argument<String>("title") ?: ""
+                    val targetMillis = call.argument<Long>("targetMillis") ?: 0L
+                    updateDayCountdownWidget(applicationContext, title, targetMillis)
+                    result.success(null)
+                }
+
                 else -> result.notImplemented()
             }
         }
@@ -101,6 +108,23 @@ class MainActivity : FlutterActivity() {
         val componentName = ComponentName(context, SchedulerAppWidgetProvider::class.java)
         val widgetIds = manager.getAppWidgetIds(componentName)
         val intent = Intent(context, SchedulerAppWidgetProvider::class.java).apply {
+            action = AppWidgetManager.ACTION_APPWIDGET_UPDATE
+            putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, widgetIds)
+        }
+        context.sendBroadcast(intent)
+    }
+
+    private fun updateDayCountdownWidget(context: Context, title: String, targetMillis: Long) {
+        val prefs = context.getSharedPreferences("ai_scheduler_day_widget", Context.MODE_PRIVATE)
+        prefs.edit()
+            .putString("title", title)
+            .putLong("targetMillis", targetMillis)
+            .apply()
+
+        val manager = AppWidgetManager.getInstance(context)
+        val componentName = ComponentName(context, DayCountdownAppWidgetProvider::class.java)
+        val widgetIds = manager.getAppWidgetIds(componentName)
+        val intent = Intent(context, DayCountdownAppWidgetProvider::class.java).apply {
             action = AppWidgetManager.ACTION_APPWIDGET_UPDATE
             putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, widgetIds)
         }

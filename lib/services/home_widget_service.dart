@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import '../models/reminder.dart';
+
 class CountdownWidgetEntry {
   const CountdownWidgetEntry({
     required this.title,
@@ -48,6 +50,23 @@ class HomeWidgetService {
     try {
       await _channel.invokeMethod<void>('updateHomeWidget', {
         'entries': const <Map<String, Object>>[],
+      });
+    } catch (_) {
+      // Ignore platform channel failures outside Android widget support.
+    }
+  }
+
+  static Future<void> updateDayCountdownWidget({
+    required Reminder? reminder,
+  }) async {
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      return;
+    }
+
+    try {
+      await _channel.invokeMethod<void>('updateDayCountdownWidget', {
+        'title': reminder?.title ?? '',
+        'targetMillis': reminder?.dateTime.millisecondsSinceEpoch ?? 0,
       });
     } catch (_) {
       // Ignore platform channel failures outside Android widget support.
