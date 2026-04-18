@@ -52,12 +52,12 @@ class AppState extends ChangeNotifier {
   Future<void> refresh() async {
     _reminders = await _databaseHelper.getAllReminders();
     _reminders.sort((a, b) => a.dateTime.compareTo(b.dateTime));
-    final nextReminder = nextUpcomingReminder;
-    if (nextReminder == null) {
+    final upcoming = upcomingReminders;
+    if (upcoming.isEmpty) {
       await HomeWidgetService.clearDayCountdownWidget();
     } else {
       await HomeWidgetService.updateDayCountdownWidget(
-        reminder: nextReminder,
+        reminders: upcoming,
       );
     }
     notifyListeners();
@@ -70,6 +70,14 @@ class AppState extends ChangeNotifier {
       }
     }
     return null;
+  }
+
+  List<Reminder> get upcomingReminders {
+    final now = DateTime.now();
+    return _reminders
+        .where((reminder) => !reminder.isCompleted && reminder.dateTime.isAfter(now))
+        .take(3)
+        .toList();
   }
 
   List<Reminder> get todayReminders => _reminders

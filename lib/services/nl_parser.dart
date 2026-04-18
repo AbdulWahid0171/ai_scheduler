@@ -16,9 +16,12 @@ class NaturalLanguageParser {
   static final RegExp _inHoursPattern =
       RegExp(r'\bin\s+(\d+)\s+hours?\b', caseSensitive: false);
   static final RegExp _explicitDatePattern = RegExp(
-    r'\b(\d{1,2})(?:st|nd|rd|th)?\s+'
+    r'\b(?:(\d{1,2})(?:st|nd|rd|th)?\s+'
     r'(january|february|march|april|may|june|july|august|september|october|november|december|'
-    r'jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\b',
+    r'jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)|'
+    r'(january|february|march|april|may|june|july|august|september|october|november|december|'
+    r'jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\s+'
+    r'(\d{1,2})(?:st|nd|rd|th)?)\b',
     caseSensitive: false,
   );
   static final RegExp _timePattern = RegExp(
@@ -106,8 +109,12 @@ class NaturalLanguageParser {
 
     final explicitDateMatch = _explicitDatePattern.firstMatch(raw);
     if (explicitDateMatch != null) {
-      final day = int.tryParse(explicitDateMatch.group(1) ?? '');
-      final month = _parseMonth(explicitDateMatch.group(2) ?? '');
+      final day = int.tryParse(
+        explicitDateMatch.group(1) ?? explicitDateMatch.group(4) ?? '',
+      );
+      final month = _parseMonth(
+        explicitDateMatch.group(2) ?? explicitDateMatch.group(3) ?? '',
+      );
       if (day != null && month != null) {
         var year = now.year;
         var candidate = DateTime(year, month, day);

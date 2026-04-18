@@ -91,7 +91,7 @@ class HomeWidgetService {
   }
 
   static Future<void> updateDayCountdownWidget({
-    required Reminder? reminder,
+    required List<Reminder> reminders,
   }) async {
     if (defaultTargetPlatform != TargetPlatform.android) {
       return;
@@ -99,8 +99,15 @@ class HomeWidgetService {
 
     try {
       await _channel.invokeMethod<void>('updateDayCountdownWidget', {
-        'title': reminder?.title ?? '',
-        'targetMillis': reminder?.dateTime.millisecondsSinceEpoch ?? 0,
+        'entries': reminders
+            .take(3)
+            .map(
+              (reminder) => {
+                'title': reminder.title,
+                'targetMillis': reminder.dateTime.millisecondsSinceEpoch,
+              },
+            )
+            .toList(),
       });
     } catch (_) {
       // Ignore platform channel failures outside Android widget support.

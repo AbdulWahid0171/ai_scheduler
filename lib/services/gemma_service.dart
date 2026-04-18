@@ -1534,6 +1534,15 @@ class GemmaService {
           '',
         )
         .replaceAll(
+          RegExp(
+            r'\b(?:january|february|march|april|may|june|july|august|september|october|november|december|'
+            r'jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\s+'
+            r'\d{1,2}(?:st|nd|rd|th)?\b',
+            caseSensitive: false,
+          ),
+          '',
+        )
+        .replaceAll(
           RegExp(r'\b(?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b', caseSensitive: false),
           '',
         )

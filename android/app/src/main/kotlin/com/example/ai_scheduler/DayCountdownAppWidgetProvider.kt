@@ -37,9 +37,8 @@ class DayCountdownAppWidgetProvider : AppWidgetProvider() {
             appWidgetId: Int
         ) {
             val prefs = context.getSharedPreferences("ai_scheduler_day_widget", Context.MODE_PRIVATE)
-            val title = prefs.getString("title", "") ?: ""
-            val targetMillis = prefs.getLong("targetMillis", 0L)
-            val hasActiveCountdown = title.isNotBlank() && targetMillis > System.currentTimeMillis()
+            val entryCount = prefs.getInt("entryCount", 0)
+            val hasEntries = entryCount > 0
 
             val launchIntent = Intent(context, MainActivity::class.java)
             val pendingIntent = PendingIntent.getActivity(
@@ -51,20 +50,52 @@ class DayCountdownAppWidgetProvider : AppWidgetProvider() {
 
             val views = RemoteViews(context.packageName, R.layout.day_countdown_widget).apply {
                 setOnClickPendingIntent(R.id.day_widget_root, pendingIntent)
-                setViewVisibility(R.id.day_widget_empty, if (hasActiveCountdown) android.view.View.GONE else android.view.View.VISIBLE)
-                setViewVisibility(R.id.day_widget_content, if (hasActiveCountdown) android.view.View.VISIBLE else android.view.View.GONE)
+                setViewVisibility(R.id.day_widget_empty, if (hasEntries) android.view.View.GONE else android.view.View.VISIBLE)
+                setViewVisibility(R.id.day_widget_list, if (hasEntries) android.view.View.VISIBLE else android.view.View.GONE)
 
-                if (hasActiveCountdown) {
-                    setTextViewText(R.id.day_widget_title, title)
-                    setTextViewText(
-                        R.id.day_widget_time,
-                        formatRemaining(targetMillis - System.currentTimeMillis())
-                    )
-                }
+                bindEntry(this, 0, prefs)
+                bindEntry(this, 1, prefs)
+                bindEntry(this, 2, prefs)
             }
 
             appWidgetManager.updateAppWidget(appWidgetId, views)
             scheduleNextUpdate(context)
+        }
+
+        private fun bindEntry(
+            views: RemoteViews,
+            index: Int,
+            prefs: android.content.SharedPreferences,
+        ) {
+            val titleViewId = when (index) {
+                0 -> R.id.day_title_1
+                1 -> R.id.day_title_2
+                else -> R.id.day_title_3
+            }
+            val subtitleViewId = when (index) {
+                0 -> R.id.day_time_1
+                1 -> R.id.day_time_2
+                else -> R.id.day_time_3
+            }
+            val rowViewId = when (index) {
+                0 -> R.id.day_row_1
+                1 -> R.id.day_row_2
+                else -> R.id.day_row_3
+            }
+
+            val title = prefs.getString("title_$index", "") ?: ""
+            val targetMillis = prefs.getLong("targetMillis_$index", 0L)
+            val visible = title.isNotBlank() && targetMillis > System.currentTimeMillis()
+            views.setViewVisibility(rowViewId, if (visible) android.view.View.VISIBLE else android.view.View.GONE)
+            if (!visible) {
+                return
+            }
+
+            views.setTextViewText(titleViewId, title)
+            views.setTextViewText(
+                subtitleViewId,
+                formatRemaining(targetMillis - System.currentTimeMillis())
+            )
         }
 
         private fun scheduleNextUpdate(context: Context) {

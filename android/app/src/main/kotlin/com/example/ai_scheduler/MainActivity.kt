@@ -25,9 +25,8 @@ class MainActivity : FlutterActivity() {
                 }
 
                 "updateDayCountdownWidget" -> {
-                    val title = call.argument<String>("title") ?: ""
-                    val targetMillis = (call.argument<Number>("targetMillis"))?.toLong() ?: 0L
-                    updateDayCountdownWidget(applicationContext, title, targetMillis)
+                    val rawEntries = call.argument<List<Map<String, Any?>>>("entries") ?: emptyList()
+                    updateDayCountdownWidget(applicationContext, rawEntries)
                     result.success(null)
                 }
 
@@ -139,12 +138,17 @@ class MainActivity : FlutterActivity() {
         context.sendBroadcast(intent)
     }
 
-    private fun updateDayCountdownWidget(context: Context, title: String, targetMillis: Long) {
+    private fun updateDayCountdownWidget(context: Context, entries: List<Map<String, Any?>>) {
         val prefs = context.getSharedPreferences("ai_scheduler_day_widget", Context.MODE_PRIVATE)
-        prefs.edit()
-            .putString("title", title)
-            .putLong("targetMillis", targetMillis)
-            .apply()
+        prefs.edit().apply {
+            putInt("entryCount", entries.size.coerceAtMost(3))
+            repeat(3) { index ->
+                val entry = entries.getOrNull(index)
+                putString("title_$index", entry?.get("title") as? String ?: "")
+                putLong("targetMillis_$index", (entry?.get("targetMillis") as? Number)?.toLong() ?: 0L)
+            }
+            apply()
+        }
 
         val manager = AppWidgetManager.getInstance(context)
         val componentName = ComponentName(context, DayCountdownAppWidgetProvider::class.java)
@@ -158,10 +162,14 @@ class MainActivity : FlutterActivity() {
 
     private fun clearDayCountdownWidget(context: Context) {
         val prefs = context.getSharedPreferences("ai_scheduler_day_widget", Context.MODE_PRIVATE)
-        prefs.edit()
-            .remove("title")
-            .remove("targetMillis")
-            .apply()
+        prefs.edit().apply {
+            remove("entryCount")
+            repeat(3) { index ->
+                remove("title_$index")
+                remove("targetMillis_$index")
+            }
+            apply()
+        }
 
         val manager = AppWidgetManager.getInstance(context)
         val componentName = ComponentName(context, DayCountdownAppWidgetProvider::class.java)
