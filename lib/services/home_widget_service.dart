@@ -56,6 +56,40 @@ class HomeWidgetService {
     }
   }
 
+  static Future<void> updatePersistentCountdownWidget({
+    required String title,
+    required String status,
+    required int remainingMillis,
+    required int targetMillis,
+  }) async {
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      return;
+    }
+
+    try {
+      await _channel.invokeMethod<void>('updatePersistentCountdownWidget', {
+        'title': title,
+        'status': status,
+        'remainingMillis': remainingMillis,
+        'targetMillis': targetMillis,
+      });
+    } catch (_) {
+      // Ignore platform channel failures outside Android widget support.
+    }
+  }
+
+  static Future<void> clearPersistentCountdownWidget() async {
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      return;
+    }
+
+    try {
+      await _channel.invokeMethod<void>('clearPersistentCountdownWidget');
+    } catch (_) {
+      // Ignore platform channel failures outside Android widget support.
+    }
+  }
+
   static Future<void> updateDayCountdownWidget({
     required Reminder? reminder,
   }) async {

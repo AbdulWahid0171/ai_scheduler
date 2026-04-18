@@ -26,13 +26,33 @@ class MainActivity : FlutterActivity() {
 
                 "updateDayCountdownWidget" -> {
                     val title = call.argument<String>("title") ?: ""
-                    val targetMillis = call.argument<Long>("targetMillis") ?: 0L
+                    val targetMillis = (call.argument<Number>("targetMillis"))?.toLong() ?: 0L
                     updateDayCountdownWidget(applicationContext, title, targetMillis)
                     result.success(null)
                 }
 
                 "clearDayCountdownWidget" -> {
                     clearDayCountdownWidget(applicationContext)
+                    result.success(null)
+                }
+
+                "updatePersistentCountdownWidget" -> {
+                    val title = call.argument<String>("title") ?: ""
+                    val status = call.argument<String>("status") ?: "idle"
+                    val remainingMillis = (call.argument<Number>("remainingMillis"))?.toLong() ?: 0L
+                    val targetMillis = (call.argument<Number>("targetMillis"))?.toLong() ?: 0L
+                    updatePersistentCountdownWidget(
+                        applicationContext,
+                        title,
+                        status,
+                        remainingMillis,
+                        targetMillis
+                    )
+                    result.success(null)
+                }
+
+                "clearPersistentCountdownWidget" -> {
+                    clearPersistentCountdownWidget(applicationContext)
                     result.success(null)
                 }
 
@@ -49,7 +69,7 @@ class MainActivity : FlutterActivity() {
                     val id = call.argument<Int>("id")
                     val title = call.argument<String>("title") ?: "Alarm"
                     val body = call.argument<String>("body") ?: ""
-                    val triggerAtMillis = call.argument<Long>("triggerAtMillis")
+                    val triggerAtMillis = (call.argument<Number>("triggerAtMillis"))?.toLong()
                     val mode = call.argument<String>("mode") ?: "alarm"
                     if (id == null || triggerAtMillis == null) {
                         result.error("invalid_args", "Missing alarm arguments", null)
@@ -147,6 +167,50 @@ class MainActivity : FlutterActivity() {
         val componentName = ComponentName(context, DayCountdownAppWidgetProvider::class.java)
         val widgetIds = manager.getAppWidgetIds(componentName)
         val intent = Intent(context, DayCountdownAppWidgetProvider::class.java).apply {
+            action = AppWidgetManager.ACTION_APPWIDGET_UPDATE
+            putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, widgetIds)
+        }
+        context.sendBroadcast(intent)
+    }
+
+    private fun updatePersistentCountdownWidget(
+        context: Context,
+        title: String,
+        status: String,
+        remainingMillis: Long,
+        targetMillis: Long,
+    ) {
+        val prefs = context.getSharedPreferences("ai_scheduler_persistent_widget", Context.MODE_PRIVATE)
+        prefs.edit()
+            .putString("title", title)
+            .putString("status", status)
+            .putLong("remainingMillis", remainingMillis)
+            .putLong("targetMillis", targetMillis)
+            .apply()
+
+        val manager = AppWidgetManager.getInstance(context)
+        val componentName = ComponentName(context, PersistentCountdownAppWidgetProvider::class.java)
+        val widgetIds = manager.getAppWidgetIds(componentName)
+        val intent = Intent(context, PersistentCountdownAppWidgetProvider::class.java).apply {
+            action = AppWidgetManager.ACTION_APPWIDGET_UPDATE
+            putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, widgetIds)
+        }
+        context.sendBroadcast(intent)
+    }
+
+    private fun clearPersistentCountdownWidget(context: Context) {
+        val prefs = context.getSharedPreferences("ai_scheduler_persistent_widget", Context.MODE_PRIVATE)
+        prefs.edit()
+            .remove("title")
+            .remove("status")
+            .remove("remainingMillis")
+            .remove("targetMillis")
+            .apply()
+
+        val manager = AppWidgetManager.getInstance(context)
+        val componentName = ComponentName(context, PersistentCountdownAppWidgetProvider::class.java)
+        val widgetIds = manager.getAppWidgetIds(componentName)
+        val intent = Intent(context, PersistentCountdownAppWidgetProvider::class.java).apply {
             action = AppWidgetManager.ACTION_APPWIDGET_UPDATE
             putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, widgetIds)
         }

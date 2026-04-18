@@ -57,7 +57,7 @@ class HomeScreen extends StatelessWidget {
                         builder: (context) => AlertDialog(
                           title: const Text('Home Widget'),
                           content: const Text(
-                            'To add a widget, long-press your home screen, open Widgets, then add AI Scheduler.\n\nThere are now two widget types:\n- Countdown Widget for your top three timers\n- Day Countdown Widget for the next reminder countdown',
+                            'To add a widget, long-press your home screen, open Widgets, then add AI Scheduler.\n\nThere are now three widget types:\n- Countdown Widget for your top three quick timers\n- Day Countdown Widget for the next reminder countdown\n- Persistent Countdown Widget for your saved controllable countdown alarm',
                           ),
                           actions: [
                             TextButton(
