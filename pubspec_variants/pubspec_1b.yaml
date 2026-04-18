@@ -29,5 +29,5 @@ dev_dependencies:
 
 flutter:
   assets:
-    - assets/models/DeepSeek-R1-Distill-Qwen-1.5B_multi-prefill-seq_q8_ekv1280.task
+    - assets/models/gemma3-1b-it-int4.task
   uses-material-design: true

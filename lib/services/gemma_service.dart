@@ -1,8 +1,11 @@
 import 'dart:async';
-import 'dart:convert';
-
+import 'dart:collection';
+import 'package:path/path.dart' as p;
+import 'package:flutter/services.dart';
 import 'package:flutter_gemma/flutter_gemma.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import '../models/local_ai_model.dart';
 import '../models/reminder.dart';
 import '../utils/date_utils.dart';
 import 'nl_parser.dart';
@@ -21,44 +24,181 @@ class GemmaService {
   GemmaService._();
 
   static final GemmaService instance = GemmaService._();
+  static const String _selectedModelPrefKey = 'selected_local_ai_model';
+  static const List<LocalAiModel> _availableModels = [
+    LocalAiModel(
+      id: 'gemma_1b',
+      label: 'Gemma 1B',
+      assetPath: 'assets/models/gemma3-1b-it-int4.task',
+      modelType: ModelType.gemmaIt,
+      note: 'Fastest and most stable fallback.',
+    ),
+    LocalAiModel(
+      id: 'gemma_2b',
+      label: 'Gemma 2B',
+      assetPath: 'assets/models/Gemma2-2B-IT_multi-prefill-seq_q8_ekv1280.task',
+      modelType: ModelType.gemmaIt,
+      note: 'Heavier, but usually stronger on scheduling phrasing.',
+    ),
+    LocalAiModel(
+      id: 'deepseek_1_5b',
+      label: 'DeepSeek 1.5B',
+      assetPath:
+          'assets/models/DeepSeek-R1-Distill-Qwen-1.5B_multi-prefill-seq_q8_ekv1280.task',
+      modelType: ModelType.deepSeek,
+      note: 'Reasoning-focused model. Heavier than Gemma 1B.',
+    ),
+  ];
 
   final FlutterGemmaPlugin _gemma = FlutterGemmaPlugin.instance;
   final NaturalLanguageParser _parser = NaturalLanguageParser();
   final StreamController<GemmaStatus> _statusController =
       StreamController<GemmaStatus>.broadcast();
+  final StreamController<LocalAiModel> _modelController =
+      StreamController<LocalAiModel>.broadcast();
 
   InferenceModel? _model;
   GemmaStatus _status = GemmaStatus.uninitialized;
   int _consecutiveModelFailures = 0;
+  List<LocalAiModel> _runtimeAvailableModels = List<LocalAiModel>.from(
+    _availableModels,
+  );
+  LocalAiModel _selectedModel = _availableModels.first;
+  String? _lastErrorMessage;
+  String? _loadedModelId;
 
   GemmaStatus get status => _status;
   Stream<GemmaStatus> get statusStream => _statusController.stream;
+  Stream<LocalAiModel> get selectedModelStream => _modelController.stream;
+  List<LocalAiModel> get availableModels =>
+      UnmodifiableListView(_runtimeAvailableModels);
+  LocalAiModel get selectedModel => _selectedModel;
+  String? get lastErrorMessage => _lastErrorMessage;
 
-  Future<void> loadModel() async {
-    if (_status == GemmaStatus.ready || _status == GemmaStatus.loading) {
+  Future<void> initialize() async {
+    final manifest = await AssetManifest.loadFromAssetBundle(rootBundle);
+    final bundledAssets = manifest.listAssets().toSet();
+    _runtimeAvailableModels = _availableModels
+        .where((item) => bundledAssets.contains(item.assetPath))
+        .toList();
+
+    final prefs = await SharedPreferences.getInstance();
+    if (_runtimeAvailableModels.isEmpty) {
+      _lastErrorMessage = 'No supported local model was bundled in this build.';
+      _selectedModel = _availableModels.first;
+      _modelController.add(_selectedModel);
+      _updateStatus(GemmaStatus.unavailable);
       return;
     }
 
+    final savedId = prefs.getString(_selectedModelPrefKey);
+    final selected =
+        _runtimeAvailableModels.where((item) => item.id == savedId);
+    if (selected.isNotEmpty) {
+      _selectedModel = selected.first;
+    } else {
+      _selectedModel = _runtimeAvailableModels.first;
+      await prefs.setString(_selectedModelPrefKey, _selectedModel.id);
+    }
+    _modelController.add(_selectedModel);
+  }
+
+  Future<void> loadModel({bool forceReload = false}) async {
+    if (!forceReload &&
+        (_status == GemmaStatus.loading ||
+            (_status == GemmaStatus.ready &&
+                _model != null &&
+                _loadedModelId == _selectedModel.id))) {
+      return;
+    }
+
+    _lastErrorMessage = null;
     _updateStatus(GemmaStatus.loading);
     try {
-      await FlutterGemma.installModel(modelType: ModelType.gemmaIt)
-          .fromAsset('assets/models/gemma3-1b-it-int4.task')
+      await FlutterGemma.installModel(
+        modelType: _selectedModel.modelType,
+        fileType: ModelFileType.task,
+      )
+          .fromAsset(_selectedModel.assetPath)
           .install();
+      await _deleteUnselectedInstalledModels();
 
       _model = await _gemma.createModel(
-        modelType: ModelType.gemmaIt,
+        modelType: _selectedModel.modelType,
+        fileType: ModelFileType.task,
         maxTokens: 1024,
       );
+      _loadedModelId = _selectedModel.id;
 
       _updateStatus(_model != null ? GemmaStatus.ready : GemmaStatus.unavailable);
-    } catch (_) {
-      _updateStatus(GemmaStatus.unavailable);
+    } catch (error) {
+      _model = null;
+      _loadedModelId = null;
+      _lastErrorMessage = 'Failed to load ${_selectedModel.label}.';
+      _updateStatus(GemmaStatus.error);
     }
   }
 
-  Future<void> unloadModel() async {
+  Future<void> unloadModel({bool updateStatus = true}) async {
+    try {
+      await _model?.close();
+    } catch (_) {}
     _model = null;
-    _updateStatus(GemmaStatus.uninitialized);
+    _loadedModelId = null;
+    if (updateStatus) {
+      _updateStatus(GemmaStatus.uninitialized);
+    }
+  }
+
+  Future<void> selectModel(String modelId) async {
+    final nextModel = _runtimeAvailableModels.where((item) => item.id == modelId);
+    if (nextModel.isEmpty) {
+      return;
+    }
+
+    final selected = nextModel.first;
+    if (selected.id == _selectedModel.id) {
+      return;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    await unloadModel(updateStatus: false);
+    _selectedModel = selected;
+    _lastErrorMessage = null;
+    _modelController.add(_selectedModel);
+    await prefs.setString(_selectedModelPrefKey, _selectedModel.id);
+    await loadModel(forceReload: true);
+  }
+
+  Future<void> _deleteUnselectedInstalledModels() async {
+    final manager = _gemma.modelManager;
+    final selectedSpec = _modelSpecFor(_selectedModel);
+
+    for (final model in _runtimeAvailableModels) {
+      if (model.id == _selectedModel.id) {
+        continue;
+      }
+
+      final spec = _modelSpecFor(model);
+      try {
+        final isInstalled = await manager.isModelInstalled(spec);
+        if (isInstalled) {
+          await manager.deleteModel(spec);
+        }
+      } catch (_) {}
+    }
+
+    manager.setActiveModel(selectedSpec);
+  }
+
+  InferenceModelSpec _modelSpecFor(LocalAiModel model) {
+    return InferenceModelSpec.fromLegacyUrl(
+      name: p.basenameWithoutExtension(model.assetPath),
+      modelUrl: 'asset://${model.assetPath}',
+      replacePolicy: ModelReplacePolicy.keep,
+      modelType: model.modelType,
+      fileType: ModelFileType.task,
+    );
   }
 
   Future<Map<String, dynamic>> processMessage(
@@ -73,7 +213,11 @@ class GemmaService {
       return _processGeneralQuestion(generalQuestion);
     }
 
-    final localResult = _handleLocally(trimmed, contextReminders);
+    final localResult = _handleLocally(
+      trimmed,
+      contextReminders,
+      recentHistory: history,
+    );
     if (localResult != null) {
       return localResult;
     }
@@ -109,22 +253,11 @@ class GemmaService {
       }
 
       _recordModelSuccess();
-
-      final cleaned = _extractJson(response);
-      if (!_looksLikeJson(cleaned)) {
+      final reply = _stripMarkdownFences(response).trim();
+      if (reply.isNotEmpty) {
         return {
           'type': 'chat',
-          'message': _stripMarkdownFences(response).trim(),
-          'shouldSave': false,
-        };
-      }
-
-      final decoded = jsonDecode(cleaned);
-      if (decoded is Map<String, dynamic>) {
-        return {
-          'type': 'chat',
-          'message': decoded['message']?.toString() ??
-              _fallbackChat()['message'],
+          'message': reply,
           'shouldSave': false,
         };
       }
@@ -134,6 +267,18 @@ class GemmaService {
     }
 
     return _fallbackChat();
+  }
+
+  Map<String, dynamic>? processLocalRulesOnly(
+    String message, {
+    List<Reminder> contextReminders = const [],
+    List<Map<String, String>> history = const [],
+  }) {
+    return _handleLocally(
+      message.trim(),
+      contextReminders,
+      recentHistory: history,
+    );
   }
 
   Future<Map<String, dynamic>> _processGeneralQuestion(String question) async {
@@ -182,8 +327,9 @@ class GemmaService {
 
   Map<String, dynamic>? _handleLocally(
     String message,
-    List<Reminder> reminders,
-  ) {
+    List<Reminder> reminders, {
+    List<Map<String, String>> recentHistory = const [],
+  }) {
     if (_isDirectScheduleQuestion(message)) {
       return _buildScheduleSummary(message, reminders);
     }
@@ -193,7 +339,11 @@ class GemmaService {
     }
 
     if (_isUpdateIntent(message)) {
-      final updates = _parseUpdates(message, reminders);
+      final updates = _parseUpdates(
+        message,
+        reminders,
+        recentHistory: recentHistory,
+      );
       if (updates.isNotEmpty) {
         final count = updates.length;
         return {
@@ -215,6 +365,28 @@ class GemmaService {
     }
 
     if (_isCreateIntent(message)) {
+      if (_looksLikeBulkAcademicInput(message)) {
+        final academicBulk = _parseAcademicBulkCreations(message);
+        if (academicBulk.isNotEmpty) {
+          final count = academicBulk.length;
+          return {
+            'type': 'bulk_preview',
+            'message': count == 1
+                ? 'I parsed 1 reminder. Say "confirm import" to save it or "cancel import" to discard it.'
+                : 'I parsed $count reminders. Say "confirm import" to save them or "cancel import" to discard them.',
+            'reminders': academicBulk,
+            'shouldSave': false,
+          };
+        }
+
+        return {
+          'type': 'chat',
+          'message':
+              'I detected a bulk academic calendar import, but I could not parse it safely. Reformat it into one event per line or a cleaner title-date list so I do not create wrong reminders.',
+          'shouldSave': false,
+        };
+      }
+
       final remindersToCreate = _parseCreations(message);
       if (remindersToCreate.isNotEmpty) {
         final count = remindersToCreate.length;
@@ -237,6 +409,16 @@ class GemmaService {
     }
 
     return null;
+  }
+
+  bool _looksLikeBulkAcademicInput(String message) {
+    final monthMatches = RegExp(
+      r'\b(?:january|february|march|april|may|june|july|august|september|october|november|december|'
+      r'jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\b',
+      caseSensitive: false,
+    ).allMatches(message).length;
+    final yearMatches = RegExp(r'\b20\d{2}\b').allMatches(message).length;
+    return monthMatches >= 2 && yearMatches >= 1;
   }
 
   bool _isCreateIntent(String text) {
@@ -349,6 +531,9 @@ class GemmaService {
   bool _isDirectScheduleQuestion(String text) {
     final lower = text.toLowerCase().trim();
     const questionPatterns = [
+      'when is',
+      'when\'s',
+      'what time is',
       'do i have',
       'did i have',
       'check if i have',
@@ -426,6 +611,93 @@ class GemmaService {
     final lower = message.toLowerCase();
     final now = DateTime.now();
     final parsed = _parser.parse(message);
+    final eventLookups = _extractEventLookups(message, reminders);
+    if (eventLookups.isNotEmpty) {
+      if (eventLookups.length == 1) {
+        final eventLookup = eventLookups.first;
+        return {
+          'type': 'chat',
+          'message':
+              '${eventLookup.title} is on ${AppDateUtils.formatHeaderDate(eventLookup.dateTime)} at ${AppDateUtils.formatTime(eventLookup.dateTime)}.',
+          'shouldSave': false,
+        };
+      }
+
+      final lines = eventLookups
+          .map(
+            (item) =>
+                '${AppDateUtils.formatHeaderDate(item.dateTime)} ${AppDateUtils.formatTime(item.dateTime)} - ${item.title}',
+          )
+          .join('\n');
+      return {
+        'type': 'chat',
+        'message': 'I found multiple matching events:\n$lines',
+        'shouldSave': false,
+      };
+    }
+
+    final monthQuery = _extractMonthQueryDate(message);
+    if (monthQuery != null) {
+      var resolvedMonth = monthQuery;
+      var monthStart = DateTime(resolvedMonth.year, resolvedMonth.month);
+      var monthEnd = DateTime(resolvedMonth.year, resolvedMonth.month + 1);
+      var items = reminders
+          .where((reminder) =>
+              !reminder.isCompleted &&
+              !reminder.dateTime.isBefore(monthStart) &&
+              reminder.dateTime.isBefore(monthEnd))
+          .toList()
+        ..sort((a, b) => a.dateTime.compareTo(b.dateTime));
+
+      if (items.isEmpty && !_hasExplicitYearInMonthQuery(message)) {
+        final fallback = reminders
+            .where((reminder) =>
+                !reminder.isCompleted &&
+                reminder.dateTime.month == monthQuery.month &&
+                !reminder.dateTime.isBefore(monthStart))
+            .toList()
+          ..sort((a, b) => a.dateTime.compareTo(b.dateTime));
+        if (fallback.isNotEmpty) {
+          resolvedMonth = DateTime(
+            fallback.first.dateTime.year,
+            fallback.first.dateTime.month,
+          );
+          monthStart = DateTime(resolvedMonth.year, resolvedMonth.month);
+          monthEnd = DateTime(resolvedMonth.year, resolvedMonth.month + 1);
+          items = reminders
+              .where((reminder) =>
+                  !reminder.isCompleted &&
+                  !reminder.dateTime.isBefore(monthStart) &&
+                  reminder.dateTime.isBefore(monthEnd))
+              .toList()
+            ..sort((a, b) => a.dateTime.compareTo(b.dateTime));
+        }
+      }
+
+      final label = AppDateUtils.formatMonthYear(monthStart);
+
+      if (items.isEmpty) {
+        return {
+          'type': 'chat',
+          'message': 'You have no schedules in $label.',
+          'shouldSave': false,
+        };
+      }
+
+      final lines = items
+          .map(
+            (item) =>
+                '${AppDateUtils.formatShortDate(item.dateTime)} ${AppDateUtils.formatTime(item.dateTime)} - ${item.title}',
+          )
+          .join('\n');
+
+      return {
+        'type': 'chat',
+        'message': 'Here is your schedule for $label:\n$lines',
+        'shouldSave': false,
+      };
+    }
+
     final targetDate = lower.contains('tomorrow')
         ? now.add(const Duration(days: 1))
         : parsed.didParseDate
@@ -463,7 +735,89 @@ class GemmaService {
     };
   }
 
+  DateTime? _extractMonthQueryDate(String text) {
+    final match = RegExp(
+      r'\b(?:in\s+)?'
+      r'(january|february|march|april|may|june|july|august|september|october|november|december|'
+      r'jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)'
+      r'(?:\s+(\d{4}))?\b',
+      caseSensitive: false,
+    ).firstMatch(text);
+    if (match == null) {
+      return null;
+    }
+
+    final month = _monthNumberFromText(match.group(1));
+    if (month == null) {
+      return null;
+    }
+
+    final now = DateTime.now();
+    final explicitYear = int.tryParse(match.group(2) ?? '');
+    final year = explicitYear ??
+        (month < now.month ? now.year + 1 : now.year);
+    return DateTime(year, month);
+  }
+
+  bool _hasExplicitYearInMonthQuery(String text) {
+    return RegExp(
+      r'\b(?:in\s+)?'
+      r'(?:january|february|march|april|may|june|july|august|september|october|november|december|'
+      r'jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)'
+      r'\s+\d{4}\b',
+      caseSensitive: false,
+    ).hasMatch(text);
+  }
+
+  int? _monthNumberFromText(String? value) {
+    switch (value?.toLowerCase()) {
+      case 'january':
+      case 'jan':
+        return 1;
+      case 'february':
+      case 'feb':
+        return 2;
+      case 'march':
+      case 'mar':
+        return 3;
+      case 'april':
+      case 'apr':
+        return 4;
+      case 'may':
+        return 5;
+      case 'june':
+      case 'jun':
+        return 6;
+      case 'july':
+      case 'jul':
+        return 7;
+      case 'august':
+      case 'aug':
+        return 8;
+      case 'september':
+      case 'sep':
+      case 'sept':
+        return 9;
+      case 'october':
+      case 'oct':
+        return 10;
+      case 'november':
+      case 'nov':
+        return 11;
+      case 'december':
+      case 'dec':
+        return 12;
+      default:
+        return null;
+    }
+  }
+
   List<Map<String, dynamic>> _parseCreations(String message) {
+    final academicBulk = _parseAcademicBulkCreations(message);
+    if (academicBulk.isNotEmpty) {
+      return academicBulk;
+    }
+
     final segments = _splitIntoSegments(_stripCreatePrefix(message));
     final results = <Map<String, dynamic>>[];
 
@@ -489,10 +843,270 @@ class GemmaService {
     return results;
   }
 
+  List<Map<String, dynamic>> _parseAcademicBulkCreations(String message) {
+    final offset = _extractReminderOffset(message);
+    final reminderTime = _extractReminderTime(message);
+    final normalized = message.replaceAll('\r', ' ').replaceAll('\n', ' ');
+    final results = <Map<String, dynamic>>[];
+    final datePattern = RegExp(
+      r'(January|February|March|April|May|June|July|August|September|October|November|December|'
+      r'Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)'
+      r'\s+(\d{1,2}),\s*(\d{4})'
+      r'(?:\s*\(?((?:\d{1,2}:\d{2}\s*(?:AM|PM))|(?:All day))\)?)?',
+      caseSensitive: false,
+    );
+
+    final matches = datePattern.allMatches(normalized).toList();
+    if (matches.length < 2) {
+      return const [];
+    }
+
+    var previousEnd = 0;
+    for (final match in matches) {
+      final rawTitle = normalized.substring(previousEnd, match.start);
+      final item = _academicReminderFromMatch(
+        rawTitle: rawTitle,
+        monthText: match.group(1),
+        dayText: match.group(2),
+        yearText: match.group(3),
+        eventTimeText: match.group(4),
+        offset: offset,
+        reminderTime: reminderTime,
+      );
+      if (item != null) {
+        results.add(item);
+      }
+      previousEnd = match.end;
+    }
+
+    return results.length >= 2 ? results : const [];
+  }
+
+  Map<String, dynamic>? _academicReminderFromMatch({
+    required String rawTitle,
+    required String? monthText,
+    required String? dayText,
+    required String? yearText,
+    required String? eventTimeText,
+    required Duration offset,
+    required DateTime? reminderTime,
+  }) {
+    final month = _monthNumberFromText(monthText);
+    final day = int.tryParse(dayText ?? '');
+    final year = int.tryParse(yearText ?? '');
+    if (rawTitle.trim().isEmpty || month == null || day == null || year == null) {
+      return null;
+    }
+
+    var eventDateTime = DateTime(year, month, day);
+    final parsedEventTime = eventTimeText == null
+        ? null
+        : eventTimeText.toLowerCase() == 'all day'
+            ? DateTime(
+                eventDateTime.year,
+                eventDateTime.month,
+                eventDateTime.day,
+                12,
+                0,
+              )
+            : _parseClockText(eventTimeText, baseDate: eventDateTime);
+    if (parsedEventTime != null) {
+      eventDateTime = parsedEventTime;
+    }
+
+    var reminderDateTime = eventDateTime.subtract(offset);
+    if (reminderTime != null) {
+      reminderDateTime = DateTime(
+        reminderDateTime.year,
+        reminderDateTime.month,
+        reminderDateTime.day,
+        reminderTime.hour,
+        reminderTime.minute,
+      );
+    }
+
+    final title = _sanitizeAcademicEventTitle(rawTitle);
+    if (title.isEmpty) {
+      return null;
+    }
+
+    return {
+      'title': title,
+      'date_time': reminderDateTime.toIso8601String(),
+      'priority': 'medium',
+    };
+  }
+
+  Duration _extractReminderOffset(String message) {
+    final dayMatch = RegExp(
+      r'(\d+)\s+days?\s+before',
+      caseSensitive: false,
+    ).firstMatch(message);
+    if (dayMatch != null) {
+      final days = int.tryParse(dayMatch.group(1) ?? '');
+      if (days != null && days >= 0) {
+        return Duration(days: days);
+      }
+    }
+
+    final weekMatch = RegExp(
+      r'(\d+)\s+weeks?\s+before',
+      caseSensitive: false,
+    ).firstMatch(message);
+    if (weekMatch != null) {
+      final weeks = int.tryParse(weekMatch.group(1) ?? '');
+      if (weeks != null && weeks >= 0) {
+        return Duration(days: weeks * 7);
+      }
+    }
+
+    return Duration.zero;
+  }
+
+  DateTime? _extractReminderTime(String message) {
+    final timeMatches = RegExp(
+      r'\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b',
+      caseSensitive: false,
+    ).allMatches(message).toList();
+    if (timeMatches.isEmpty) {
+      return null;
+    }
+
+    final last = timeMatches.last;
+    final raw = last.group(0);
+    if (raw == null) {
+      return null;
+    }
+
+    return _parseClockText(raw, baseDate: DateTime.now());
+  }
+
+  DateTime? _parseClockText(String text, {required DateTime baseDate}) {
+    final match = RegExp(
+      r'^\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*$',
+      caseSensitive: false,
+    ).firstMatch(text);
+    if (match == null) {
+      return null;
+    }
+
+    final hourRaw = int.tryParse(match.group(1) ?? '');
+    final minute = int.tryParse(match.group(2) ?? '0') ?? 0;
+    final meridiem = (match.group(3) ?? '').toLowerCase();
+    if (hourRaw == null) {
+      return null;
+    }
+
+    var hour = hourRaw;
+    if (meridiem == 'pm' && hour < 12) {
+      hour += 12;
+    } else if (meridiem == 'am' && hour == 12) {
+      hour = 0;
+    }
+
+    return DateTime(
+      baseDate.year,
+      baseDate.month,
+      baseDate.day,
+      hour,
+      minute,
+    );
+  }
+
+  String _sanitizeAcademicEventTitle(String rawTitle) {
+    final cleaned = rawTitle
+        .replaceAll(RegExp(r'^(?:create|add|set|schedule)\s+', caseSensitive: false), '')
+        .replaceAll(RegExp(r'^(?:reminders?\s+)?', caseSensitive: false), '')
+        .replaceAll(
+          RegExp(r'\b(?:\d+\s+days?\s+before|\d+\s+weeks?\s+before)\b', caseSensitive: false),
+          '',
+        )
+        .replaceAll(
+          RegExp(r'\b\d{1,2}:\d{2}\s*(?:am|pm)\b', caseSensitive: false),
+          '',
+        )
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim()
+        .replaceAll(RegExp(r'[,:;.\- ]+$'), '');
+    final splitChunks = cleaned
+        .split(RegExp(r'(?:\)\s*|[.;]\s+|\n+)'))
+        .map((item) => item.trim())
+        .where((item) => item.isNotEmpty)
+        .toList();
+    return splitChunks.isEmpty ? cleaned : splitChunks.last;
+  }
+
+  List<Reminder> _extractEventLookups(String message, List<Reminder> reminders) {
+    final match = RegExp(
+      r"^\s*(?:when\s+is|what\s+time\s+is|when'?s|when\s+do\s+i\s+have|do\s+i\s+have)\s+(.+?)\??\s*$",
+      caseSensitive: false,
+    ).firstMatch(message);
+    if (match == null) {
+      return const [];
+    }
+
+    var query = (match.group(1) ?? '').trim().toLowerCase();
+    query = query
+        .replaceAll(RegExp(r'^(?:the|my)\s+', caseSensitive: false), '')
+        .replaceAll(
+          RegExp(r'\b(?:event|events|schedule|reminder|task|have)\b', caseSensitive: false),
+          '',
+        )
+        .trim();
+    if (query.isEmpty) {
+      return const [];
+    }
+
+    final active = reminders.where((item) => !item.isCompleted).toList();
+    if (active.isEmpty) {
+      return const [];
+    }
+
+    final queryTokens = _keywordTokens(query);
+    final scored = <MapEntry<Reminder, int>>[];
+    for (final reminder in active) {
+      final title = reminder.title.toLowerCase();
+      var score = 0;
+      if (title == query) {
+        score += 100;
+      }
+      if (title.contains(query)) {
+        score += 50;
+      }
+      for (final token in queryTokens) {
+        if (token.isNotEmpty && title.contains(token)) {
+          score += 10;
+        }
+      }
+      if (score > 0) {
+        scored.add(MapEntry(reminder, score));
+      }
+    }
+
+    if (scored.isEmpty) {
+      return const [];
+    }
+
+    scored.sort((a, b) {
+      final scoreCompare = b.value.compareTo(a.value);
+      if (scoreCompare != 0) {
+        return scoreCompare;
+      }
+      return a.key.dateTime.compareTo(b.key.dateTime);
+    });
+
+    final topScore = scored.first.value;
+    return scored
+        .where((entry) => entry.value == topScore || entry.value >= topScore - 10)
+        .map((entry) => entry.key)
+        .toList();
+  }
+
   List<Map<String, dynamic>> _parseUpdates(
     String message,
-    List<Reminder> reminders,
-  ) {
+    List<Reminder> reminders, {
+    List<Map<String, String>> recentHistory = const [],
+  }) {
     final segments = _splitIntoSegments(message);
     final results = <Map<String, dynamic>>[];
 
@@ -502,19 +1116,24 @@ class GemmaService {
         continue;
       }
 
-      final update = _parseSingleUpdate(segment, reminders);
-      if (update != null) {
-        results.add(update);
+      final updates = _parseSingleUpdate(
+        segment,
+        reminders,
+        recentHistory: recentHistory,
+      );
+      if (updates.isNotEmpty) {
+        results.addAll(updates);
       }
     }
 
     return results;
   }
 
-  Map<String, dynamic>? _parseSingleUpdate(
+  List<Map<String, dynamic>> _parseSingleUpdate(
     String segment,
-    List<Reminder> reminders,
-  ) {
+    List<Reminder> reminders, {
+    List<Map<String, String>> recentHistory = const [],
+  }) {
     final command = segment.replaceFirst(
       RegExp(
         r'^(?:please\s+)?(?:move|reschedule|change|update|edit|postpone|rename)\s+',
@@ -525,7 +1144,7 @@ class GemmaService {
     final separator = RegExp(r'\s+(?:to|for)\s+', caseSensitive: false)
         .firstMatch(command);
     if (separator == null) {
-      return null;
+      return const [];
     }
 
     final referencePhrase =
@@ -535,50 +1154,88 @@ class GemmaService {
             ).trim();
     final schedulePhrase = command.substring(separator.end).trim();
     if (referencePhrase.isEmpty || schedulePhrase.isEmpty) {
-      return null;
+      return const [];
     }
 
-    final existing = _findReminderByReference(referencePhrase, reminders);
-    if (existing == null) {
-      return null;
+    final existingMatches = _findRemindersByScopeOrReference(
+      referencePhrase,
+      reminders,
+      recentHistory: recentHistory,
+    );
+    if (existingMatches.isEmpty) {
+      return const [];
     }
 
     final parsed = _parser.parse(schedulePhrase);
-    final hasNewDateOrTime = parsed.didParseDate || parsed.didParseTime;
-    if (!hasNewDateOrTime) {
-      return null;
+    final monthTarget = _extractMonthQueryDate(schedulePhrase);
+    final keepSameTime = RegExp(
+      r'\bsame(?:\s+time)?\b',
+      caseSensitive: false,
+    ).hasMatch(schedulePhrase);
+    final hasNewDateOrTime =
+        parsed.didParseDate || parsed.didParseTime || monthTarget != null;
+    if (!hasNewDateOrTime && !keepSameTime) {
+      return const [];
     }
 
-    final newDateTime = DateTime(
-      parsed.dateTime.year,
-      parsed.dateTime.month,
-      parsed.dateTime.day,
-      parsed.dateTime.hour,
-      parsed.dateTime.minute,
-    );
+    return existingMatches.map((existing) {
+      final targetDate = monthTarget != null && !parsed.didParseDate
+          ? _safeDateInMonth(
+              existing.dateTime,
+              year: monthTarget.year,
+              month: monthTarget.month,
+            )
+          : parsed.dateTime;
+      final newDateTime = DateTime(
+        (parsed.didParseDate || monthTarget != null)
+            ? targetDate.year
+            : existing.dateTime.year,
+        (parsed.didParseDate || monthTarget != null)
+            ? targetDate.month
+            : existing.dateTime.month,
+        (parsed.didParseDate || monthTarget != null)
+            ? targetDate.day
+            : existing.dateTime.day,
+        parsed.didParseTime ? parsed.dateTime.hour : existing.dateTime.hour,
+        parsed.didParseTime
+            ? parsed.dateTime.minute
+            : existing.dateTime.minute,
+      );
 
-    return {
-      'id': existing.id,
-      'title': existing.title,
-      'date_time': newDateTime.toIso8601String(),
-      'priority': existing.priority,
-    };
+      return {
+        'id': existing.id,
+        'title': existing.title,
+        'date_time': newDateTime.toIso8601String(),
+        'priority': existing.priority,
+      };
+    }).toList();
   }
 
-  Reminder? _findReminderByReference(String reference, List<Reminder> reminders) {
+  List<Reminder> _findRemindersByReference(
+    String reference,
+    List<Reminder> reminders, {
+    List<Map<String, String>> recentHistory = const [],
+  }) {
     final trimmed = reference.trim();
     if (trimmed.isEmpty) {
-      return null;
+      return const [];
     }
 
     final globallyOrdered = reminders.toList()
       ..sort((a, b) => a.dateTime.compareTo(b.dateTime));
+    final contextualOrdered = _extractRecentContextReminders(
+      recentHistory: recentHistory,
+      reminders: reminders,
+    );
     final ordinalIndex = _extractRequestedIndex(trimmed);
-    if (ordinalIndex != null &&
-        RegExp(r'^(?:#)?\d+$').hasMatch(trimmed) &&
-        ordinalIndex > 0 &&
-        ordinalIndex <= globallyOrdered.length) {
-      return globallyOrdered[ordinalIndex - 1];
+    if (ordinalIndex != null && ordinalIndex > 0) {
+      if (ordinalIndex <= contextualOrdered.length) {
+        return [contextualOrdered[ordinalIndex - 1]];
+      }
+      if (RegExp(r'^(?:#)?\d+$').hasMatch(trimmed) &&
+          ordinalIndex <= globallyOrdered.length) {
+        return [globallyOrdered[ordinalIndex - 1]];
+      }
     }
 
     final cleanedReference = trimmed
@@ -592,9 +1249,23 @@ class GemmaService {
           '',
         )
         .trim();
+    final lowerCleaned = cleanedReference.toLowerCase();
+    final wantsMultiple = _referenceImpliesMultiple(lowerCleaned);
+
+    if (_isPronounReference(lowerCleaned)) {
+      if (contextualOrdered.isEmpty) {
+        return const [];
+      }
+      return wantsMultiple
+          ? contextualOrdered
+          : [contextualOrdered.first];
+    }
 
     final parsedReference = _parser.parse(cleanedReference);
-    final referenceTitle = _normalizeTitle(parsedReference.title);
+    final normalizedReferenceTitle = _normalizeTitle(parsedReference.title);
+    final referenceTitle = _isGenericReferenceTitle(normalizedReferenceTitle)
+        ? ''
+        : normalizedReferenceTitle;
     final hasReferenceDateOrTime =
         parsedReference.didParseDate || parsedReference.didParseTime;
 
@@ -608,17 +1279,9 @@ class GemmaService {
         .toList()
       ..sort((a, b) => a.dateTime.compareTo(b.dateTime));
 
-    if (candidates.isEmpty) {
-      if (ordinalIndex != null &&
-          ordinalIndex > 0 &&
-          ordinalIndex <= globallyOrdered.length) {
-        return globallyOrdered[ordinalIndex - 1];
-      }
-      return null;
-    }
-
     if (hasReferenceDateOrTime) {
-      final matchedByDateTime = candidates.where((item) {
+      final dateScope = candidates.isEmpty ? globallyOrdered : candidates;
+      final matchedByDateTime = dateScope.where((item) {
         final sameDate = !parsedReference.didParseDate ||
             AppDateUtils.isSameDay(item.dateTime, parsedReference.dateTime);
         final sameTime = !parsedReference.didParseTime ||
@@ -631,17 +1294,161 @@ class GemmaService {
         if (ordinalIndex != null &&
             ordinalIndex > 0 &&
             ordinalIndex <= matchedByDateTime.length) {
-          return matchedByDateTime[ordinalIndex - 1];
+          return [matchedByDateTime[ordinalIndex - 1]];
         }
-        return matchedByDateTime.first;
+        return wantsMultiple ? matchedByDateTime : [matchedByDateTime.first];
       }
     }
 
-    if (ordinalIndex != null && ordinalIndex > 0 && ordinalIndex <= candidates.length) {
-      return candidates[ordinalIndex - 1];
+    if (candidates.isNotEmpty) {
+      if (ordinalIndex != null &&
+          ordinalIndex > 0 &&
+          ordinalIndex <= candidates.length) {
+        return [candidates[ordinalIndex - 1]];
+      }
+      return wantsMultiple ? candidates : [candidates.first];
     }
 
-    return candidates.first;
+    if (contextualOrdered.isNotEmpty) {
+      return wantsMultiple ? contextualOrdered : [contextualOrdered.first];
+    }
+
+    return const [];
+  }
+
+  List<Reminder> _findRemindersByScopeOrReference(
+    String reference,
+    List<Reminder> reminders, {
+    List<Map<String, String>> recentHistory = const [],
+  }) {
+    final scoped = _findRemindersByScope(reference, reminders);
+    if (scoped.isNotEmpty) {
+      return scoped;
+    }
+    return _findRemindersByReference(
+      reference,
+      reminders,
+      recentHistory: recentHistory,
+    );
+  }
+
+  List<Reminder> _findRemindersByScope(String reference, List<Reminder> reminders) {
+    final lower = reference.toLowerCase().trim();
+    final active = reminders.where((item) => !item.isCompleted).toList()
+      ..sort((a, b) => a.dateTime.compareTo(b.dateTime));
+    if (active.isEmpty) {
+      return const [];
+    }
+
+    final monthQuery = _extractMonthQueryDate(reference);
+    if (monthQuery != null) {
+      return active
+          .where((item) =>
+              item.dateTime.year == monthQuery.year &&
+              item.dateTime.month == monthQuery.month)
+          .toList();
+    }
+
+    if (lower.contains('today')) {
+      return active
+          .where((item) => AppDateUtils.isSameDay(item.dateTime, DateTime.now()))
+          .toList();
+    }
+    if (lower.contains('tomorrow')) {
+      final tomorrow = DateTime.now().add(const Duration(days: 1));
+      return active
+          .where((item) => AppDateUtils.isSameDay(item.dateTime, tomorrow))
+          .toList();
+    }
+
+    final parsed = _parser.parse(reference);
+    if (parsed.didParseDate) {
+      final sameDay = active
+          .where((item) => AppDateUtils.isSameDay(item.dateTime, parsed.dateTime))
+          .toList();
+      if (sameDay.isNotEmpty) {
+        return sameDay;
+      }
+    }
+
+    const weekdays = [
+      'monday',
+      'tuesday',
+      'wednesday',
+      'thursday',
+      'friday',
+      'saturday',
+      'sunday',
+    ];
+    for (var i = 0; i < weekdays.length; i++) {
+      if (lower.contains(weekdays[i])) {
+        return active.where((item) => item.dateTime.weekday == i + 1).toList();
+      }
+    }
+
+    return const [];
+  }
+
+  DateTime _safeDateInMonth(
+    DateTime original, {
+    required int year,
+    required int month,
+  }) {
+    final lastDay = DateTime(year, month + 1, 0).day;
+    final safeDay = original.day > lastDay ? lastDay : original.day;
+    return DateTime(year, month, safeDay);
+  }
+
+  List<Reminder> _extractRecentContextReminders({
+    required List<Map<String, String>> recentHistory,
+    required List<Reminder> reminders,
+  }) {
+    final activeReminders = reminders.where((item) => !item.isCompleted).toList();
+    for (final item in recentHistory.reversed) {
+      final text = (item['text'] ?? '').toLowerCase();
+      if (text.isEmpty) {
+        continue;
+      }
+
+      final matches = activeReminders
+          .where((reminder) => text.contains(reminder.title.toLowerCase()))
+          .map((reminder) => MapEntry(reminder, text.indexOf(reminder.title.toLowerCase())))
+          .where((entry) => entry.value >= 0)
+          .toList()
+        ..sort((a, b) => a.value.compareTo(b.value));
+
+      if (matches.isNotEmpty) {
+        return matches.map((entry) => entry.key).toList();
+      }
+    }
+
+    return const [];
+  }
+
+  bool _referenceImpliesMultiple(String text) {
+    return RegExp(
+      r'\b(?:plans|schedules|reminders|tasks|all|them|those)\b',
+      caseSensitive: false,
+    ).hasMatch(text);
+  }
+
+  bool _isPronounReference(String text) {
+    final normalized = text.trim();
+    return RegExp(
+      r'^(?:that|it|this|those|them|that one|this one|same one)$',
+      caseSensitive: false,
+    ).hasMatch(normalized);
+  }
+
+  bool _isGenericReferenceTitle(String text) {
+    if (text.trim().isEmpty) {
+      return true;
+    }
+
+    return RegExp(
+      r'^(?:plan|plans|schedule|schedules|reminder|reminders|task|tasks|that|it|this|those|them|same)$',
+      caseSensitive: false,
+    ).hasMatch(text.trim());
   }
 
   int? _extractRequestedIndex(String text) {
@@ -757,39 +1564,161 @@ class GemmaService {
     required List<Map<String, String>> recentHistory,
     required bool isRetry,
   }) {
-    final historyText = recentHistory.isEmpty
-        ? 'No recent conversation.'
-        : recentHistory.map((item) => '${item['role']}: ${item['text']}').join('\n');
-    final reminderText = reminders.isEmpty
-        ? 'No reminders saved.'
-        : reminders
+    final scopedHistory = _selectRelevantHistory(
+      recentHistory: recentHistory,
+      userMessage: userMessage,
+    );
+    final scopedReminders = _selectRelevantReminders(
+      userMessage: userMessage,
+      reminders: reminders,
+    );
+    final historyText = scopedHistory.isEmpty
+        ? 'No relevant recent conversation.'
+        : scopedHistory
+            .map((item) => '[${item['role']}] ${item['text']}')
+            .join('\n');
+    final reminderText = scopedReminders.isEmpty
+        ? 'No directly relevant saved reminders were found.'
+        : scopedReminders
             .map(
               (item) =>
-                  '- ${item.title} at ${item.dateTime.toIso8601String()}',
+                  '- ${item.title} | ${item.dateTime.toIso8601String()} | ${item.isCompleted ? 'completed' : 'active'}',
             )
             .join('\n');
-    final retryLine =
-        isRetry ? 'Return exactly one JSON object.\n' : '';
+    final retryLine = isRetry
+        ? 'Your previous answer failed. Keep this answer short and plain text.\n\n'
+        : '';
 
-    return '''$retryLine
-You are a local AI scheduling assistant inside a reminder app.
-Only help with schedules, reminders, dates, times, conflicts, and availability.
-If the user asks for unrelated general knowledge or chit-chat, reply briefly that you only handle scheduling tasks.
-Never invent reminders, counts, dates, or schedule changes. If the available reminders or history are insufficient, ask a short clarifying question.
-Do not claim that you created, updated, or deleted anything in chat. The app handles those actions separately.
+    return '''${retryLine}You are a local scheduling assistant inside a reminder app.
+You only answer questions about reminders, schedules, dates, times, conflicts, and availability.
+The app itself creates, updates, deletes, and looks up reminders. You only help interpret natural language and explain schedule information.
 
-Recent conversation:
+Rules:
+- Reply in plain text only.
+- Accept messy or natural phrasing and answer based on the available reminders.
+- Never invent reminders, dates, counts, or schedule changes.
+- If the user asks something unrelated to schedules or reminders, say briefly that you only handle scheduling here.
+- If the request is ambiguous, ask one short clarifying question.
+- If there is not enough matching schedule data, say that briefly instead of guessing.
+
+Relevant recent conversation:
 $historyText
 
-Current reminders:
+Relevant reminders:
 $reminderText
 
-User:
+Current user request:
 $userMessage
-
-Return exactly one JSON object:
-{"type":"chat","message":"<your reply>"}
 ''';
+  }
+
+  List<Map<String, String>> _selectRelevantHistory({
+    required List<Map<String, String>> recentHistory,
+    required String userMessage,
+  }) {
+    final queryTokens = _keywordTokens(userMessage);
+    final selected = recentHistory
+        .where((item) {
+          final text = item['text']?.trim() ?? '';
+          if (text.isEmpty) {
+            return false;
+          }
+
+          final lower = text.toLowerCase();
+          if (_containsScheduleSignal(lower)) {
+            return true;
+          }
+
+          return queryTokens.any(lower.contains);
+        })
+        .toList();
+
+    final trimmed = selected.length > 4
+        ? selected.sublist(selected.length - 4)
+        : selected;
+    return trimmed
+        .map(
+          (item) => {
+            'role': item['role'] ?? 'user',
+            'text': item['text'] ?? '',
+          },
+        )
+        .toList();
+  }
+
+  List<Reminder> _selectRelevantReminders({
+    required String userMessage,
+    required List<Reminder> reminders,
+  }) {
+    if (reminders.isEmpty) {
+      return const [];
+    }
+
+    final lower = userMessage.toLowerCase();
+    final tokens = _keywordTokens(userMessage);
+    final monthQuery = _extractMonthQueryDate(userMessage);
+    final parsed = _parser.parse(userMessage);
+    final now = DateTime.now();
+
+    bool matches(Reminder reminder) {
+      if (reminder.isCompleted) {
+        return false;
+      }
+
+      if (monthQuery != null) {
+        return reminder.dateTime.year == monthQuery.year &&
+            reminder.dateTime.month == monthQuery.month;
+      }
+
+      if (lower.contains('today')) {
+        return AppDateUtils.isSameDay(reminder.dateTime, now);
+      }
+
+      if (lower.contains('tomorrow')) {
+        return AppDateUtils.isSameDay(
+          reminder.dateTime,
+          now.add(const Duration(days: 1)),
+        );
+      }
+
+      if (parsed.didParseDate &&
+          AppDateUtils.isSameDay(reminder.dateTime, parsed.dateTime)) {
+        return true;
+      }
+
+      final title = reminder.title.toLowerCase();
+      return tokens.any(title.contains);
+    }
+
+    final scoped = reminders.where(matches).toList()
+      ..sort((a, b) => a.dateTime.compareTo(b.dateTime));
+    if (scoped.isNotEmpty) {
+      return scoped.take(8).toList();
+    }
+
+    final active = reminders.where((item) => !item.isCompleted).toList()
+      ..sort((a, b) => a.dateTime.compareTo(b.dateTime));
+    return active.take(5).toList();
+  }
+
+  List<String> _keywordTokens(String text) {
+    return text
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9\s]'), ' ')
+        .split(RegExp(r'\s+'))
+        .where((token) => token.length >= 3)
+        .where((token) => !_ignoredQueryTokens.contains(token))
+        .toSet()
+        .toList();
+  }
+
+  bool _containsScheduleSignal(String text) {
+    return _isScheduleQuery(text) ||
+        _isDirectScheduleQuestion(text) ||
+        _isCreateIntent(text) ||
+        _isUpdateIntent(text) ||
+        text.contains('today') ||
+        text.contains('tomorrow');
   }
 
   Map<String, dynamic> _fallbackChat() {
@@ -820,27 +1749,13 @@ Return exactly one JSON object:
     }
 
     _consecutiveModelFailures = 0;
-    await unloadModel();
-    await loadModel();
+    await unloadModel(updateStatus: false);
+    await loadModel(forceReload: true);
   }
 
   void _updateStatus(GemmaStatus newStatus) {
     _status = newStatus;
     _statusController.add(_status);
-  }
-
-  bool _looksLikeJson(String text) {
-    final trimmed = text.trim();
-    return trimmed.startsWith('{') && trimmed.endsWith('}');
-  }
-
-  String _extractJson(String text) {
-    final start = text.indexOf('{');
-    final end = text.lastIndexOf('}');
-    if (start == -1 || end == -1 || end <= start) {
-      return text.trim();
-    }
-    return text.substring(start, end + 1);
   }
 
   String _stripMarkdownFences(String text) {
@@ -849,3 +1764,36 @@ Return exactly one JSON object:
         .replaceAll(RegExp(r'```$', multiLine: true), '');
   }
 }
+
+const Set<String> _ignoredQueryTokens = {
+  'what',
+  'when',
+  'where',
+  'which',
+  'have',
+  'with',
+  'that',
+  'this',
+  'there',
+  'about',
+  'show',
+  'tell',
+  'need',
+  'want',
+  'reminder',
+  'reminders',
+  'schedule',
+  'schedules',
+  'task',
+  'tasks',
+  'calendar',
+  'plan',
+  'plans',
+  'please',
+  'check',
+  'would',
+  'could',
+  'should',
+  'into',
+  'from',
+};

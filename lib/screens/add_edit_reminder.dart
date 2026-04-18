@@ -141,6 +141,29 @@ class _AddEditReminderSheetState extends State<AddEditReminderSheet> {
       return;
     }
 
+    final appState = context.read<AppState>();
+    final conflict = appState.reminders.where((reminder) {
+      if (reminder.isCompleted) {
+        return false;
+      }
+      if (widget.reminder?.id != null && reminder.id == widget.reminder!.id) {
+        return false;
+      }
+      return reminder.dateTime == _selectedDateTime;
+    }).firstOrNull;
+    if (conflict != null) {
+      final conflictTime = AppDateUtils.formatTime(conflict.dateTime);
+      final conflictDate = AppDateUtils.formatShortDate(conflict.dateTime);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'That time is already used by "${conflict.title}" on $conflictDate at $conflictTime.',
+          ),
+        ),
+      );
+      return;
+    }
+
     final title = _titleController.text.trim().isEmpty && widget.countdownMode
         ? 'Countdown'
         : _titleController.text.trim();
@@ -162,7 +185,7 @@ class _AddEditReminderSheetState extends State<AddEditReminderSheet> {
     );
 
     try {
-      await context.read<AppState>().saveReminder(reminder);
+      await appState.saveReminder(reminder);
       if (mounted) {
         Navigator.of(context).pop();
       }

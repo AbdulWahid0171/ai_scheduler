@@ -21,7 +21,7 @@ class DatabaseHelper {
     final dbPath = await getDatabasesPath();
     final path = p.join(dbPath, filePath);
 
-    return openDatabase(path, version: 2, onCreate: _createDb, onUpgrade: _upgradeDb);
+    return openDatabase(path, version: 3, onCreate: _createDb, onUpgrade: _upgradeDb);
   }
 
   Future<void> _upgradeDb(Database db, int oldVersion, int newVersion) async {
@@ -32,9 +32,15 @@ class DatabaseHelper {
           text TEXT NOT NULL,
           is_user INTEGER NOT NULL,
           timestamp TEXT NOT NULL,
-          metadata TEXT
+          metadata TEXT,
+          room TEXT NOT NULL DEFAULT 'local'
         )
       ''');
+    }
+    if (oldVersion < 3) {
+      await db.execute(
+        "ALTER TABLE chat_messages ADD COLUMN room TEXT NOT NULL DEFAULT 'local'",
+      );
     }
   }
 
@@ -60,7 +66,8 @@ class DatabaseHelper {
         text TEXT NOT NULL,
         is_user INTEGER NOT NULL,
         timestamp TEXT NOT NULL,
-        metadata TEXT
+        metadata TEXT,
+        room TEXT NOT NULL DEFAULT 'local'
       )
     ''');
   }
@@ -73,14 +80,19 @@ class DatabaseHelper {
     return db.insert('chat_messages', message);
   }
 
-  Future<List<Map<String, dynamic>>> getChatHistory() async {
+  Future<List<Map<String, dynamic>>> getChatHistory({String room = 'local'}) async {
     final db = await database;
-    return db.query('chat_messages', orderBy: 'timestamp ASC');
+    return db.query(
+      'chat_messages',
+      where: 'room = ?',
+      whereArgs: [room],
+      orderBy: 'timestamp ASC',
+    );
   }
 
-  Future<void> clearChatHistory() async {
+  Future<void> clearChatHistory({String room = 'local'}) async {
     final db = await database;
-    await db.delete('chat_messages');
+    await db.delete('chat_messages', where: 'room = ?', whereArgs: [room]);
   }
 
   Future<int> insertReminder(Reminder reminder) async {

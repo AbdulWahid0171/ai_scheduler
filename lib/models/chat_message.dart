@@ -4,6 +4,7 @@ class ChatMessage {
   final bool isUser;
   final DateTime timestamp;
   final String? metadata; // For storing JSON results or summary info
+  final String room;
 
   ChatMessage({
     this.id,
@@ -11,6 +12,7 @@ class ChatMessage {
     required this.isUser,
     required this.timestamp,
     this.metadata,
+    this.room = 'local',
   });
 
   Map<String, dynamic> toMap() {
@@ -20,6 +22,7 @@ class ChatMessage {
       'is_user': isUser ? 1 : 0,
       'timestamp': timestamp.toIso8601String(),
       'metadata': metadata,
+      'room': room,
     };
   }
 
@@ -30,6 +33,7 @@ class ChatMessage {
       isUser: (map['is_user'] as int) == 1,
       timestamp: DateTime.parse(map['timestamp'] as String),
       metadata: map['metadata'] as String?,
+      room: map['room'] as String? ?? 'local',
     );
   }
 }

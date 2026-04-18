@@ -31,6 +31,11 @@ class MainActivity : FlutterActivity() {
                     result.success(null)
                 }
 
+                "clearDayCountdownWidget" -> {
+                    clearDayCountdownWidget(applicationContext)
+                    result.success(null)
+                }
+
                 else -> result.notImplemented()
             }
         }
@@ -119,6 +124,23 @@ class MainActivity : FlutterActivity() {
         prefs.edit()
             .putString("title", title)
             .putLong("targetMillis", targetMillis)
+            .apply()
+
+        val manager = AppWidgetManager.getInstance(context)
+        val componentName = ComponentName(context, DayCountdownAppWidgetProvider::class.java)
+        val widgetIds = manager.getAppWidgetIds(componentName)
+        val intent = Intent(context, DayCountdownAppWidgetProvider::class.java).apply {
+            action = AppWidgetManager.ACTION_APPWIDGET_UPDATE
+            putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, widgetIds)
+        }
+        context.sendBroadcast(intent)
+    }
+
+    private fun clearDayCountdownWidget(context: Context) {
+        val prefs = context.getSharedPreferences("ai_scheduler_day_widget", Context.MODE_PRIVATE)
+        prefs.edit()
+            .remove("title")
+            .remove("targetMillis")
             .apply()
 
         val manager = AppWidgetManager.getInstance(context)

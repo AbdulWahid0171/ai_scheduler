@@ -72,4 +72,16 @@ class HomeWidgetService {
       // Ignore platform channel failures outside Android widget support.
     }
   }
+
+  static Future<void> clearDayCountdownWidget() async {
+    if (defaultTargetPlatform != TargetPlatform.android) {
+      return;
+    }
+
+    try {
+      await _channel.invokeMethod<void>('clearDayCountdownWidget');
+    } catch (_) {
+      // Ignore platform channel failures outside Android widget support.
+    }
+  }
 }

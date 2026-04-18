@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 class AppDateUtils {
   static final DateFormat _clockFormat = DateFormat('HH:mm:ss');
   static final DateFormat _headerDateFormat = DateFormat('EEEE, MMMM d, y');
+  static final DateFormat _monthYearFormat = DateFormat('MMMM y');
   static final DateFormat _timeFormat = DateFormat('h:mm a');
   static final DateFormat _shortDateFormat = DateFormat('EEE, MMM d');
   static final DateFormat _groupDateFormat = DateFormat('EEEE, MMM d');
@@ -11,6 +12,9 @@ class AppDateUtils {
 
   static String formatHeaderDate(DateTime dateTime) =>
       _headerDateFormat.format(dateTime);
+
+  static String formatMonthYear(DateTime dateTime) =>
+      _monthYearFormat.format(dateTime);
 
   static String formatTime(DateTime dateTime) => _timeFormat.format(dateTime);
 

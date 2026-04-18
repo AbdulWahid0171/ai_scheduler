@@ -6,8 +6,12 @@ import 'database/database_helper.dart';
 import 'screens/add_edit_reminder.dart';
 import 'screens/ai_chat_screen.dart';
 import 'screens/all_reminders_screen.dart';
+import 'screens/api_chat_screen.dart';
 import 'screens/calendar_screen.dart';
 import 'screens/home_screen.dart';
+import 'screens/settings_screen.dart';
+import 'services/api_inference_service.dart';
+import 'services/gemma_service.dart';
 import 'services/notification_service.dart';
 import 'state/app_state.dart';
 import 'utils/constants.dart';
@@ -16,6 +20,8 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await FlutterGemma.initialize();
   await NotificationService.instance.initialize((payload) async {});
+  await GemmaService.instance.initialize();
+  await ApiInferenceService.instance.initialize();
   
   // Cleanup junk reminders from previous sessions
   await DatabaseHelper.instance.cleanupJunkReminders();
@@ -97,9 +103,10 @@ class _DashboardShellState extends State<DashboardShell> {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<AppState>(
-      builder: (context, state, _) {
-        if (state.isLoading) {
+    return Selector<AppState, bool>(
+      selector: (_, state) => state.isLoading,
+      builder: (context, isLoading, _) {
+        if (isLoading) {
           return const Scaffold(
             body: Center(child: CircularProgressIndicator()),
           );
@@ -112,18 +119,21 @@ class _DashboardShellState extends State<DashboardShell> {
             elevation: 0,
             leading: IconButton(
               icon: const Icon(Icons.auto_awesome, color: AppColors.accent),
-              onPressed: () => Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const AiChatScreen()),
+              onPressed: () => _openChatPicker(context),
+            ),
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.tune, color: AppColors.textPrimary),
+                onPressed: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                ),
               ),
-            ),
+            ],
           ),
-          body: AnimatedSwitcher(
-            duration: const Duration(milliseconds: 250),
-            child: KeyedSubtree(
-              key: ValueKey(_index),
-              child: _screens[_index],
-            ),
+          body: IndexedStack(
+            index: _index,
+            children: _screens,
           ),
           floatingActionButton: FloatingActionButton(
             onPressed: () => AddEditReminderSheet.show(context),
@@ -158,6 +168,44 @@ class _DashboardShellState extends State<DashboardShell> {
           ),
         );
       },
+    );
+  }
+
+  Future<void> _openChatPicker(BuildContext context) {
+    return showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: AppColors.surface,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.smart_toy_outlined, color: AppColors.accent),
+              title: const Text('Local Chat'),
+              subtitle: const Text('Offline scheduler using local model'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const AiChatScreen()),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.cloud_outlined, color: AppColors.accent),
+              title: const Text('API Chat'),
+              subtitle: const Text('Gemini or OpenRouter with short context'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const ApiChatScreen()),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

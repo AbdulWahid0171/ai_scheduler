@@ -1,23 +1,28 @@
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+
 import '../models/chat_message.dart';
 import '../models/reminder.dart';
+import '../services/api_inference_service.dart';
 import '../services/gemma_service.dart';
 import '../state/app_state.dart';
 import '../utils/constants.dart';
 import '../utils/date_utils.dart';
 import 'settings_screen.dart';
 
-class AiChatScreen extends StatefulWidget {
-  const AiChatScreen({super.key});
+class ApiChatScreen extends StatefulWidget {
+  const ApiChatScreen({super.key});
 
   @override
-  State<AiChatScreen> createState() => _AiChatScreenState();
+  State<ApiChatScreen> createState() => _ApiChatScreenState();
 }
 
-class _AiChatScreenState extends State<AiChatScreen> {
+class _ApiChatScreenState extends State<ApiChatScreen> {
+  static const int _maxContextMessages = 14;
+
   final _controller = TextEditingController();
   final _scrollController = ScrollController();
   final List<ChatMessage> _messages = [];
@@ -28,7 +33,6 @@ class _AiChatScreenState extends State<AiChatScreen> {
   void initState() {
     super.initState();
     _loadChatHistory();
-    GemmaService.instance.loadModel();
   }
 
   @override
@@ -39,11 +43,14 @@ class _AiChatScreenState extends State<AiChatScreen> {
   }
 
   Future<void> _loadChatHistory() async {
-    final history = await context.read<AppState>().getChatHistory(room: 'local');
-    if (!mounted) return;
+    final history = await context.read<AppState>().getChatHistory(room: 'api');
+    if (!mounted) {
+      return;
+    }
     setState(() {
-      _messages.clear();
-      _messages.addAll(history);
+      _messages
+        ..clear()
+        ..addAll(history);
     });
     _scrollToBottom();
   }
@@ -53,7 +60,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
       if (_scrollController.hasClients) {
         _scrollController.animateTo(
           _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
+          duration: const Duration(milliseconds: 250),
           curve: Curves.easeOut,
         );
       }
@@ -61,40 +68,46 @@ class _AiChatScreenState extends State<AiChatScreen> {
   }
 
   Future<void> _clearChat() async {
-    final appState = context.read<AppState>();
     final confirm = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Clear Chat?'),
-        content: const Text('This will delete all messages in this conversation.'),
+        title: const Text('Clear API Chat?'),
+        content: const Text('This resets the API chat context and history.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('CANCEL'),
+            child: const Text('Cancel'),
           ),
-          TextButton(
+          FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('CLEAR', style: TextStyle(color: Colors.red)),
+            child: const Text('Clear'),
           ),
         ],
       ),
     );
 
-    if (confirm == true) {
-      await appState.clearChatHistory(room: 'local');
-      if (!mounted) return;
-      setState(() {
-        _messages.clear();
-        _pendingImport = null;
-      });
+    if (confirm != true) {
+      return;
     }
+    if (!mounted) {
+      return;
+    }
+
+    final appState = context.read<AppState>();
+    await appState.clearChatHistory(room: 'api');
+    if (!mounted) {
+      return;
+    }
+    setState(_messages.clear);
+    _pendingImport = null;
   }
 
   Future<void> _sendMessage(String text) async {
-    if (text.trim().isEmpty) return;
-    final appState = context.read<AppState>();
     final trimmed = text.trim();
-
+    if (trimmed.isEmpty) {
+      return;
+    }
+    final appState = context.read<AppState>();
     if (_pendingImport != null && _isConfirmImportCommand(trimmed)) {
       await _confirmPendingImport(appState, trimmed);
       return;
@@ -103,12 +116,22 @@ class _AiChatScreenState extends State<AiChatScreen> {
       await _cancelPendingImport(appState, trimmed);
       return;
     }
+    if (_messages.length >= _maxContextMessages) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'API chat context is full. Clear the API chat to refresh it.',
+          ),
+        ),
+      );
+      return;
+    }
 
     final userMsg = ChatMessage(
       text: trimmed,
       isUser: true,
       timestamp: DateTime.now(),
-      room: 'local',
+      room: 'api',
     );
 
     setState(() {
@@ -117,155 +140,55 @@ class _AiChatScreenState extends State<AiChatScreen> {
     });
     _controller.clear();
     _scrollToBottom();
-
     await appState.saveChatMessage(userMsg);
 
     try {
-      if (!mounted) return;
-
-      // Assemble history (last 4 messages for context continuity)
-      final history = _messages.length > 1 
-          ? _messages.reversed.skip(1).take(4).toList().reversed.map((m) => {
-              'role': m.isUser ? 'user' : 'model',
-              'text': m.text,
-            }).toList()
+      final history = _messages.length > 1
+          ? _messages.reversed
+              .skip(1)
+              .take(6)
+              .toList()
+              .reversed
+              .map((m) => {
+                    'role': m.isUser ? 'user' : 'assistant',
+                    'text': m.text,
+                  })
+              .toList()
           : <Map<String, String>>[];
 
-      final responseMap = await GemmaService.instance.processMessage(
+      final localResult = GemmaService.instance.processLocalRulesOnly(
         trimmed,
         contextReminders: appState.reminders,
         history: history,
       );
-      
-      final aiText = responseMap['message'] as String? ?? '';
-      final bool shouldSave = responseMap['shouldSave'] ?? false;
-      
-      String? metadata;
-      final List<String> warnings = [];
-      final List<Reminder> simulatedReminders = List<Reminder>.from(appState.reminders);
-      final remindersToCreate = <Reminder>[];
-      final remindersToUpdate = <Reminder>[];
 
-      if (responseMap['type'] == 'bulk_preview' && responseMap['reminders'] != null) {
-        final previewData = (responseMap['reminders'] as List<dynamic>)
-            .whereType<Map>()
-            .map((item) => item.map((key, value) => MapEntry('$key', value)))
-            .toList();
-        _pendingImport = previewData;
-        metadata = jsonEncode(
-          previewData
-              .map((item) => {'type': 'preview', ...item})
-              .toList(),
-        );
+      final responseMap = localResult ??
+          await ApiInferenceService.instance.processMessage(
+            message: trimmed,
+            history: history,
+            reminders: appState.reminders,
+          );
+
+      await _applyResponse(appState, responseMap);
+    } catch (_) {
+      if (!mounted) {
+        return;
       }
-      
-      if (shouldSave) {
-        final List<Map<String, dynamic>> processedActions = [];
-
-        // Handle Creations
-        if (responseMap['reminders'] != null) {
-          final List<dynamic> reminderData = responseMap['reminders'];
-          for (final res in reminderData) {
-            final dateTime = DateTime.tryParse(res['date_time'] ?? '') ?? DateTime.now();
-            _checkConflicts(
-              dateTime,
-              res['title'],
-              warnings,
-              simulatedReminders,
-            );
-
-            final reminder = Reminder(
-              title: res['title'] ?? 'Untitled',
-              dateTime: dateTime,
-              createdAt: DateTime.now(),
-              updatedAt: DateTime.now(),
-              priority: res['priority'] ?? 'medium',
-            );
-            remindersToCreate.add(reminder);
-            simulatedReminders.add(reminder);
-            processedActions.add({'type': 'create', ...res});
-          }
-        }
-
-        // Handle Updates
-        if (responseMap['updates'] != null) {
-          final List<dynamic> updateData = responseMap['updates'];
-          for (final update in updateData) {
-            final int? id = update['id'] is int ? update['id'] : int.tryParse(update['id']?.toString() ?? '');
-            if (id == null) continue;
-
-            final existing = appState.reminders.where((r) => r.id == id).firstOrNull;
-            if (existing != null) {
-              final newDateTime = DateTime.tryParse(update['date_time'] ?? '') ?? existing.dateTime;
-              _checkConflicts(
-                newDateTime,
-                update['title'] ?? existing.title,
-                warnings,
-                simulatedReminders,
-                excludeId: id,
-              );
-
-              final updated = existing.copyWith(
-                title: update['title'],
-                dateTime: newDateTime,
-                priority: update['priority'],
-                updatedAt: DateTime.now(),
-              );
-              remindersToUpdate.add(updated);
-              final simulatedIndex =
-                  simulatedReminders.indexWhere((r) => r.id == id);
-              if (simulatedIndex != -1) {
-                simulatedReminders[simulatedIndex] = updated;
-              } else {
-                simulatedReminders.add(updated);
-              }
-              processedActions.add({'type': 'update', ...update});
-            }
-          }
-        }
-
-        if (processedActions.isNotEmpty) {
-          metadata = jsonEncode(processedActions);
-        }
-
-        await appState.saveReminderBatch(
-          creates: remindersToCreate,
-          updates: remindersToUpdate,
-        );
-      }
-
-      final warningText = warnings.isEmpty ? "" : "${warnings.join("\n")}\n\n";
-      final aiMsg = ChatMessage(
-        text: "$warningText$aiText",
-        isUser: false,
-        timestamp: DateTime.now(),
-        metadata: metadata,
-        room: 'local',
-      );
-
-      if (!mounted) return;
-      setState(() {
-        _messages.add(aiMsg);
-        _isProcessing = false;
-      });
-      await appState.saveChatMessage(aiMsg);
-      _scrollToBottom();
-    } catch (e) {
-      if (!mounted) return;
       setState(() => _isProcessing = false);
       final errorMsg = ChatMessage(
-        text: "Sorry, I ran into an error processing that.",
+        text: 'API chat ran into an error.',
         isUser: false,
         timestamp: DateTime.now(),
-        room: 'local',
+        room: 'api',
       );
       setState(() => _messages.add(errorMsg));
+      await appState.saveChatMessage(errorMsg);
       _scrollToBottom();
     }
   }
 
-  KeyEventResult _handleComposerKey(FocusNode node, KeyEvent event, bool isEnabled) {
-    if (!isEnabled || event is! KeyDownEvent) {
+  KeyEventResult _handleComposerKey(KeyEvent event) {
+    if (event is! KeyDownEvent) {
       return KeyEventResult.ignored;
     }
     if (event.logicalKey != LogicalKeyboardKey.enter &&
@@ -279,6 +202,118 @@ class _AiChatScreenState extends State<AiChatScreen> {
     return KeyEventResult.handled;
   }
 
+  Future<void> _applyResponse(
+    AppState appState,
+    Map<String, dynamic> responseMap,
+  ) async {
+    final aiText = responseMap['message'] as String? ?? '';
+    final shouldSave = responseMap['shouldSave'] == true;
+    String? metadata;
+    final warnings = <String>[];
+    final simulatedReminders = List<Reminder>.from(appState.reminders);
+
+    if (responseMap['type'] == 'bulk_preview' && responseMap['reminders'] != null) {
+      final previewData = (responseMap['reminders'] as List<dynamic>)
+          .whereType<Map>()
+          .map((item) => item.map((key, value) => MapEntry('$key', value)))
+          .toList();
+      _pendingImport = previewData;
+      metadata = jsonEncode(
+        previewData.map((item) => {'type': 'preview', ...item}).toList(),
+      );
+    }
+
+    if (shouldSave) {
+      final processedActions = <Map<String, dynamic>>[];
+
+      if (responseMap['reminders'] != null) {
+        final reminderData = responseMap['reminders'] as List<dynamic>;
+        for (final res in reminderData) {
+          final dateTime =
+              DateTime.tryParse(res['date_time']?.toString() ?? '') ??
+                  DateTime.now();
+          _checkConflicts(
+            dateTime,
+            res['title']?.toString(),
+            warnings,
+            simulatedReminders,
+          );
+          final reminder = Reminder(
+            title: res['title']?.toString() ?? 'Untitled',
+            dateTime: dateTime,
+            createdAt: DateTime.now(),
+            updatedAt: DateTime.now(),
+            priority: res['priority']?.toString() ?? 'medium',
+          );
+          await appState.saveReminder(reminder);
+          simulatedReminders.add(reminder);
+          processedActions.add({'type': 'create', ...res});
+        }
+      }
+
+      if (responseMap['updates'] != null) {
+        final updateData = responseMap['updates'] as List<dynamic>;
+        for (final update in updateData) {
+          final id = update['id'] is int
+              ? update['id'] as int
+              : int.tryParse(update['id']?.toString() ?? '');
+          if (id == null) {
+            continue;
+          }
+          final existing =
+              appState.reminders.where((r) => r.id == id).firstOrNull;
+          if (existing == null) {
+            continue;
+          }
+          final newDateTime =
+              DateTime.tryParse(update['date_time']?.toString() ?? '') ??
+                  existing.dateTime;
+          _checkConflicts(
+            newDateTime,
+            update['title']?.toString() ?? existing.title,
+            warnings,
+            simulatedReminders,
+            excludeId: id,
+          );
+          final updated = existing.copyWith(
+            title: update['title']?.toString(),
+            dateTime: newDateTime,
+            priority: update['priority']?.toString(),
+            updatedAt: DateTime.now(),
+          );
+          await appState.saveReminder(updated);
+          final simulatedIndex =
+              simulatedReminders.indexWhere((r) => r.id == id);
+          if (simulatedIndex != -1) {
+            simulatedReminders[simulatedIndex] = updated;
+          }
+          processedActions.add({'type': 'update', ...update});
+        }
+      }
+
+      if (processedActions.isNotEmpty) {
+        metadata = jsonEncode(processedActions);
+      }
+    }
+
+    final aiMsg = ChatMessage(
+      text: warnings.isEmpty ? aiText : '${warnings.join('\n')}\n\n$aiText',
+      isUser: false,
+      timestamp: DateTime.now(),
+      metadata: metadata,
+      room: 'api',
+    );
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _messages.add(aiMsg);
+      _isProcessing = false;
+    });
+    await appState.saveChatMessage(aiMsg);
+    _scrollToBottom();
+  }
+
   void _checkConflicts(
     DateTime dateTime,
     String? title,
@@ -286,17 +321,18 @@ class _AiChatScreenState extends State<AiChatScreen> {
     List<Reminder> reminders, {
     int? excludeId,
   }) {
-    final conflicts = reminders.where((r) => 
-      r.id != excludeId &&
-      r.dateTime.isAfter(dateTime.subtract(const Duration(minutes: 30))) &&
-      r.dateTime.isBefore(dateTime.add(const Duration(minutes: 30))) &&
-      !r.isCompleted
+    final conflicts = reminders.where(
+      (r) =>
+          r.id != excludeId &&
+          r.dateTime.isAfter(dateTime.subtract(const Duration(minutes: 30))) &&
+          r.dateTime.isBefore(dateTime.add(const Duration(minutes: 30))) &&
+          !r.isCompleted,
     );
-
     if (conflicts.isNotEmpty) {
       final conflict = conflicts.first;
-      final time = "${conflict.dateTime.hour}:${conflict.dateTime.minute.toString().padLeft(2, '0')}";
-      warnings.add("Warning: '$title' conflicts with '${conflict.title}' at $time.");
+      warnings.add(
+        "Warning: '$title' conflicts with '${conflict.title}' at ${AppDateUtils.formatTime(conflict.dateTime)}.",
+      );
     }
   }
 
@@ -323,7 +359,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
       text: text,
       isUser: true,
       timestamp: DateTime.now(),
-      room: 'local',
+      room: 'api',
     );
     setState(() {
       _messages.add(userMsg);
@@ -337,7 +373,9 @@ class _AiChatScreenState extends State<AiChatScreen> {
     final reminders = importPlan.$1;
     final duplicateCount = importPlan.$2;
     final conflictCount = importPlan.$3;
-    await appState.saveReminderBatch(creates: reminders);
+    for (final reminder in reminders) {
+      await appState.saveReminder(reminder);
+    }
 
     final aiMsg = ChatMessage(
       text: _buildImportResultMessage(
@@ -359,7 +397,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
             )
             .toList(),
       ),
-      room: 'local',
+      room: 'api',
     );
     if (!mounted) return;
     setState(() {
@@ -376,7 +414,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
       text: text,
       isUser: true,
       timestamp: DateTime.now(),
-      room: 'local',
+      room: 'api',
     );
     setState(() {
       _messages.add(userMsg);
@@ -391,7 +429,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
       text: 'I discarded that bulk import preview.',
       isUser: false,
       timestamp: DateTime.now(),
-      room: 'local',
+      room: 'api',
     );
     if (!mounted) return;
     setState(() => _messages.add(aiMsg));
@@ -482,10 +520,13 @@ class _AiChatScreenState extends State<AiChatScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final settings = ApiInferenceService.instance.settings;
+    final providerLabel =
+        settings.provider == ApiProvider.gemini ? 'Gemini' : 'OpenRouter';
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
-        title: const Text('AI Scheduler'),
+        title: const Text('API Chat'),
         backgroundColor: AppColors.surface,
         centerTitle: true,
         actions: [
@@ -502,104 +543,64 @@ class _AiChatScreenState extends State<AiChatScreen> {
           ),
         ],
       ),
-      body: StreamBuilder<GemmaStatus>(
-        stream: GemmaService.instance.statusStream,
-        initialData: GemmaService.instance.status,
-        builder: (context, snapshot) {
-          final status = snapshot.data ?? GemmaStatus.uninitialized;
-
-          return Column(
-            children: [
-              if (status != GemmaStatus.ready) _buildStatusBanner(status),
-              Expanded(
-                child: _messages.isEmpty ? _buildEmptyState() : _buildMessageList(),
-              ),
-              if (_isProcessing)
-                const Padding(
-                  padding: EdgeInsets.all(8.0),
-                  child: LinearProgressIndicator(color: AppColors.accent),
-                ),
-              _buildInputBar(true),
-            ],
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _buildStatusBanner(GemmaStatus status) {
-    final modelName = GemmaService.instance.selectedModel.label;
-    final text = switch (status) {
-      GemmaStatus.loading => '$modelName is loading. Scheduling still works.',
-      GemmaStatus.downloading => '$modelName is downloading. Scheduling still works.',
-      GemmaStatus.unavailable => '$modelName is unavailable. Scheduling still works locally.',
-      GemmaStatus.uninitialized => '$modelName is not loaded yet. Scheduling still works.',
-      GemmaStatus.error => GemmaService.instance.lastErrorMessage ??
-          '$modelName failed to load. Change it in Settings.',
-      _ => '',
-    };
-
-    if (text.isEmpty) {
-      return const SizedBox.shrink();
-    }
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-      color: AppColors.surface,
-      child: Text(
-        text,
-        style: const TextStyle(color: AppColors.textSecondary),
+      body: Column(
+        children: [
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            color: AppColors.surface,
+            child: Text(
+              'Provider: $providerLabel. API chat keeps a short rolling context for smoother use.',
+              style: const TextStyle(color: AppColors.textSecondary),
+            ),
+          ),
+          Expanded(
+            child: _messages.isEmpty ? _buildEmptyState() : _buildMessageList(),
+          ),
+          if (_isProcessing)
+            const Padding(
+              padding: EdgeInsets.all(8),
+              child: LinearProgressIndicator(color: AppColors.accent),
+            ),
+          _buildInputBar(),
+        ],
       ),
     );
   }
 
   Widget _buildEmptyState() {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        return SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-          child: ConstrainedBox(
-            constraints: BoxConstraints(minHeight: constraints.maxHeight),
-            child: Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Icon(Icons.auto_awesome, size: 64, color: AppColors.accent),
-                  const SizedBox(height: 16),
-                  const Text(
-                    'How can I help you today?',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 10),
-                  const Text(
-                    'Use q/ for general questions.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 13,
-                      color: AppColors.textSecondary,
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    alignment: WrapAlignment.center,
-                    children: [
-                      _exampleChip("Call Mom at 5pm"),
-                      _exampleChip("Grocery shopping Friday at 6pm"),
-                      _exampleChip("What do I have tomorrow?"),
-                      _exampleChip("Move dentist appointment to Monday 4pm"),
-                      _exampleChip("q/What is the capital of Bangladesh?"),
-                    ],
-                  ),
-                ],
-              ),
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.cloud_outlined, size: 60, color: AppColors.accent),
+            const SizedBox(height: 16),
+            const Text(
+              'API Chat',
+              style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
             ),
-          ),
-        );
-      },
+            const SizedBox(height: 10),
+            const Text(
+              'Separate room for Gemini or OpenRouter. Reminder actions still stay local.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: AppColors.textSecondary),
+            ),
+            const SizedBox(height: 20),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              alignment: WrapAlignment.center,
+              children: [
+                _exampleChip('What do I have next Friday?'),
+                _exampleChip('Schedule one named random for tomorrow 8am'),
+                _exampleChip('Move football matches to Sunday 6pm'),
+              ],
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -617,10 +618,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
       controller: _scrollController,
       padding: const EdgeInsets.all(16),
       itemCount: _messages.length,
-      itemBuilder: (context, index) {
-        final msg = _messages[index];
-        return _buildMessageBubble(msg);
-      },
+      itemBuilder: (context, index) => _buildMessageBubble(_messages[index]),
     );
   }
 
@@ -629,7 +627,8 @@ class _AiChatScreenState extends State<AiChatScreen> {
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: Column(
-        crossAxisAlignment: isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+        crossAxisAlignment:
+            isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
         children: [
           Container(
             margin: const EdgeInsets.symmetric(vertical: 4),
@@ -652,11 +651,6 @@ class _AiChatScreenState extends State<AiChatScreen> {
                 style: TextStyle(
                   color: isUser ? Colors.black : AppColors.textPrimary,
                 ),
-                contextMenuBuilder: (context, editableTextState) {
-                  return AdaptiveTextSelectionToolbar.editableText(
-                    editableTextState: editableTextState,
-                  );
-                },
               ),
             ),
           ),
@@ -667,7 +661,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
   }
 
   Widget _buildSummaryCard(String metadata) {
-    final List<dynamic> data = jsonDecode(metadata);
+    final data = jsonDecode(metadata) as List<dynamic>;
     return Container(
       width: 250,
       margin: const EdgeInsets.symmetric(vertical: 8),
@@ -690,6 +684,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
           const Divider(),
           ...data.map((item) {
             final type = item['type']?.toString() ?? 'create';
+            final dateTime = DateTime.parse(item['date_time'].toString());
             final label = switch (type) {
               'update' => '[Updated]',
               'preview' => '[Preview]',
@@ -698,7 +693,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
             return Padding(
               padding: const EdgeInsets.symmetric(vertical: 2),
               child: Text(
-                '$label ${item['title']} (${AppDateUtils.formatShortDate(DateTime.parse(item['date_time']))}, ${AppDateUtils.formatTime(DateTime.parse(item['date_time']))})',
+                '$label ${item['title']} (${AppDateUtils.formatShortDate(dateTime)}, ${AppDateUtils.formatTime(dateTime)})',
                 style: TextStyle(
                   fontSize: 12,
                   color: type == 'update' || type == 'preview'
@@ -713,7 +708,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
     );
   }
 
-  Widget _buildInputBar(bool isEnabled) {
+  Widget _buildInputBar() {
     return SafeArea(
       top: false,
       child: Container(
@@ -725,44 +720,31 @@ class _AiChatScreenState extends State<AiChatScreen> {
             const Padding(
               padding: EdgeInsets.only(left: 4, bottom: 4),
               child: Text(
-                'Tip: start with q/ for general questions.',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: AppColors.textSecondary,
-                ),
+                'Short rolling context only. Clear chat when it fills up.',
+                style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
               ),
             ),
             Row(
               children: [
                 Expanded(
                   child: Focus(
-                    onKeyEvent: (node, event) =>
-                        _handleComposerKey(node, event, isEnabled),
+                    onKeyEvent: (_, event) => _handleComposerKey(event),
                     child: TextField(
                       controller: _controller,
-                      enabled: isEnabled,
                       minLines: 1,
                       maxLines: 6,
                       keyboardType: TextInputType.multiline,
                       textInputAction: TextInputAction.newline,
-                      enableInteractiveSelection: true,
-                      contextMenuBuilder: (context, editableTextState) {
-                        return AdaptiveTextSelectionToolbar.editableText(
-                          editableTextState: editableTextState,
-                        );
-                      },
-                      decoration: InputDecoration(
-                        hintText: isEnabled
-                            ? 'Message AI Scheduler... or use q/...'
-                            : 'AI is initializing...',
+                      decoration: const InputDecoration(
+                        hintText: 'Message API Chat...',
                         border: InputBorder.none,
                       ),
                     ),
                   ),
                 ),
                 IconButton(
-                  icon: Icon(Icons.send, color: isEnabled ? AppColors.accent : Colors.grey),
-                  onPressed: isEnabled ? () => _sendMessage(_controller.text) : null,
+                  icon: const Icon(Icons.send, color: AppColors.accent),
+                  onPressed: () => _sendMessage(_controller.text),
                 ),
               ],
             ),

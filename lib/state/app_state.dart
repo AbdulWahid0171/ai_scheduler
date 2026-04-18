@@ -52,9 +52,14 @@ class AppState extends ChangeNotifier {
   Future<void> refresh() async {
     _reminders = await _databaseHelper.getAllReminders();
     _reminders.sort((a, b) => a.dateTime.compareTo(b.dateTime));
-    await HomeWidgetService.updateDayCountdownWidget(
-      reminder: nextUpcomingReminder,
-    );
+    final nextReminder = nextUpcomingReminder;
+    if (nextReminder == null) {
+      await HomeWidgetService.clearDayCountdownWidget();
+    } else {
+      await HomeWidgetService.updateDayCountdownWidget(
+        reminder: nextReminder,
+      );
+    }
     notifyListeners();
   }
 
@@ -153,6 +158,30 @@ class AppState extends ChangeNotifier {
     await refresh();
   }
 
+  Future<void> saveReminderBatch({
+    List<Reminder> creates = const [],
+    List<Reminder> updates = const [],
+  }) async {
+    for (final reminder in creates) {
+      final notificationId =
+          reminder.notificationId ?? _notificationService.generateNotificationId();
+      final created = reminder.copyWith(notificationId: notificationId);
+      final id = await _databaseHelper.insertReminder(created);
+      final saved = created.copyWith(id: id);
+      await _notificationService.scheduleReminder(saved);
+    }
+
+    for (final reminder in updates) {
+      await _notificationService.cancelReminder(reminder.notificationId);
+      await _databaseHelper.updateReminder(reminder);
+      await _notificationService.scheduleReminder(reminder);
+    }
+
+    if (creates.isNotEmpty || updates.isNotEmpty) {
+      await refresh();
+    }
+  }
+
   Future<void> deleteReminder(Reminder reminder) async {
     if (reminder.id == null) {
       return;
@@ -184,8 +213,8 @@ class AppState extends ChangeNotifier {
     await refresh();
   }
 
-  Future<List<ChatMessage>> getChatHistory() async {
-    final maps = await _databaseHelper.getChatHistory();
+  Future<List<ChatMessage>> getChatHistory({String room = 'local'}) async {
+    final maps = await _databaseHelper.getChatHistory(room: room);
     return maps.map(ChatMessage.fromMap).toList();
   }
 
@@ -193,8 +222,8 @@ class AppState extends ChangeNotifier {
     await _databaseHelper.insertChatMessage(message.toMap());
   }
 
-  Future<void> clearChatHistory() async {
-    await _databaseHelper.clearChatHistory();
+  Future<void> clearChatHistory({String room = 'local'}) async {
+    await _databaseHelper.clearChatHistory(room: room);
     notifyListeners();
   }
 
